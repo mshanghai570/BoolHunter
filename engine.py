@@ -3,7 +3,7 @@ from dataclasses import dataclass
 from typing import List, Optional
 from binaryninja import (
     BinaryView, Function, HighLevelILOperation, 
-    HighLevelILInstruction, BoolType, TypeVariant
+    HighLevelILInstruction, BoolType
 )
 
 @dataclass
