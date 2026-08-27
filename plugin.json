@@ -1,0 +1,15 @@
+{
+    "pluginmetaversion": 2,
+    "name": "BoolHunter",
+    "type": ["ui", "helper"],
+    "api": ["python3"],
+    "description": "Heuristic-based Boolean function identification and indexing tool.",
+    "longdescription": "BoolHunter analyzes functions to identify Boolean return types using multi-signal heuristics including IL analysis, caller context, and naming patterns.",
+    "author": "Binary Ninja User",
+    "version": "1.0.0",
+    "minimumbinaryninjaversion": 3500,
+    "license": {
+        "name": "MIT",
+        "url": "https://opensource.org/licenses/MIT"
+    }
+}
