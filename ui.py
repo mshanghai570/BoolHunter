@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
     QTextEdit,
     QVBoxLayout,
     QLineEdit,
+    QLabel,
 )
 
 
@@ -29,6 +30,7 @@ class BoolHunterSidebarWidget(SidebarWidget):
         self.frame = frame
         self.bv = data
         self.results = []
+        self._hunt_task = None
         self.setup_ui()
         self.bind_to_active_view()
 
@@ -95,6 +97,10 @@ class BoolHunterSidebarWidget(SidebarWidget):
         top_row.addWidget(self.filter_edit)
         self.layout.addLayout(top_row)
 
+        self.status_label = QLabel("Ready")
+        self.status_label.setStyleSheet("color: #a0a0a0; padding: 2px 0;")
+        self.layout.addWidget(self.status_label)
+
         # Main Content
         self.splitter = QSplitter(Qt.Vertical)
 
@@ -125,43 +131,117 @@ class BoolHunterSidebarWidget(SidebarWidget):
 
         from .main import HunterTask
 
+        self.results = []
+        self.table.setRowCount(0)
+        self.details.clear()
         self.hunt_btn.setEnabled(False)
         self.hunt_btn.setText("Hunting...")
-        task = HunterTask(self.bv, self.on_hunt_complete)
+        self.status_label.setText("Starting Boolean heuristic screening...")
+
+        task = HunterTask(
+            self.bv,
+            lambda *args: self.on_hunt_progress(task, *args),
+            lambda results: self.on_hunt_results(task, results),
+            lambda results, cancelled: self.on_hunt_complete(task, results, cancelled),
+        )
+        self._hunt_task = task
         task.start()
 
-    def on_hunt_complete(self, results):
+    def on_hunt_progress(
+        self,
+        task,
+        phase,
+        scanned,
+        total,
+        priority_candidates,
+        analyzed,
+        results_found,
+    ):
+        execute_on_main_thread(
+            lambda: self._update_hunt_progress(
+                task,
+                phase,
+                scanned,
+                total,
+                priority_candidates,
+                analyzed,
+                results_found,
+            )
+        )
+
+    def _update_hunt_progress(
+        self,
+        task,
+        phase,
+        scanned,
+        total,
+        priority_candidates,
+        analyzed,
+        results_found,
+    ):
+        if task is not self._hunt_task:
+            return
+        self.status_label.setText(
+            f"{phase}: {scanned:,}/{total:,} analyzed · "
+            f"{priority_candidates:,} priority candidates · "
+            f"{results_found:,} results"
+        )
+
+    def on_hunt_results(self, task, results):
+        execute_on_main_thread(lambda: self._append_hunt_results(task, results))
+
+    def _append_hunt_results(self, task, results):
+        if task is not self._hunt_task:
+            return
+        self.results.extend(results)
+        query = self.filter_edit.text().lower()
+        for res in sorted(results, key=lambda x: x.final_score, reverse=True):
+            self._add_result_row(res, query)
+
+    def on_hunt_complete(self, task, results, cancelled):
+        execute_on_main_thread(
+            lambda: self._finish_hunt(task, results, cancelled)
+        )
+
+    def _finish_hunt(self, task, results, cancelled):
+        if task is not self._hunt_task:
+            return
         self.results = results
-        execute_on_main_thread(self.refresh_table)
-        execute_on_main_thread(lambda: self.hunt_btn.setEnabled(True))
-        execute_on_main_thread(lambda: self.hunt_btn.setText("🎯 HUNT AGAIN"))
+        self.refresh_table()
+        self.hunt_btn.setEnabled(True)
+        self.hunt_btn.setText("🎯 HUNT AGAIN")
+        state = "Cancelled" if cancelled else "Complete"
+        self.status_label.setText(f"{state}: {len(results):,} Boolean candidates found")
+        self._hunt_task = None
+
+    def _add_result_row(self, res, query):
+        if query and query not in res.func.name.lower():
+            return
+
+        row = self.table.rowCount()
+        self.table.insertRow(row)
+
+        name_item = QTableWidgetItem(res.func.name)
+        name_item.setData(Qt.UserRole, res)
+
+        score_item = QTableWidgetItem(f"{res.final_score}%")
+        if res.final_score >= 90:
+            score_item.setForeground(Qt.green)
+        elif res.final_score >= 70:
+            score_item.setForeground(Qt.cyan)
+
+        self.table.setItem(row, 0, name_item)
+        self.table.setItem(row, 1, score_item)
+        self.table.setItem(row, 2, QTableWidgetItem(hex(res.func.start)))
 
     def refresh_table(self):
         query = self.filter_edit.text().lower()
         self.table.setRowCount(0)
 
-        # Sort by score descending
-        sorted_res = sorted(self.results, key=lambda x: x.final_score, reverse=True)
-
-        for res in sorted_res:
-            if query and query not in res.func.name.lower():
-                continue
-
-            row = self.table.rowCount()
-            self.table.insertRow(row)
-
-            name_item = QTableWidgetItem(res.func.name)
-            name_item.setData(Qt.UserRole, res)
-
-            score_item = QTableWidgetItem(f"{res.final_score}%")
-            if res.final_score >= 90:
-                score_item.setForeground(Qt.green)
-            elif res.final_score >= 70:
-                score_item.setForeground(Qt.cyan)
-
-            self.table.setItem(row, 0, name_item)
-            self.table.setItem(row, 1, score_item)
-            self.table.setItem(row, 2, QTableWidgetItem(hex(res.func.start)))
+        # Sort by score descending when a full refresh is requested, such as
+        # search filtering or hunt completion. Live batches append efficiently.
+        for res in sorted(self.results, key=lambda x: x.final_score, reverse=True):
+            self._add_result_row(res, query)
 
     def on_selection_changed(self):
         items = self.table.selectedItems()

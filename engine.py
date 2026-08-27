@@ -69,14 +69,39 @@ class BoolHunterEngine:
         except (AttributeError, RuntimeError):
             return False
 
-    def analyze_function(self, func: Function) -> BoolResult:
-        res = BoolResult(func)
-
+    def _add_fast_evidence(self, func: Function, res: BoolResult):
+        """Apply the existing inexpensive type and naming heuristics."""
         # Signal 1: Explicit Type (+60)
         if isinstance(func.return_type, BoolType):
             res.add(60, "Explicit Boolean return type")
         elif "bool" in str(func.return_type).lower():
             res.add(60, "Type system identifies return as Boolean-like")
+
+        # Signal 6: Naming (+10 to +15)
+        name = func.name
+        # Handle Obj-C: -[Class isActive] -> isActive
+        clean_name = name.split(' ')[-1].strip(']') if ' ' in name else name
+        if self.bool_patterns.match(clean_name):
+            bonus = 15 if ' ' in name else 10
+            res.add(bonus, f"Boolean-style naming pattern: '{clean_name}'")
+
+    def fast_candidate_score(self, func: Function) -> int:
+        """Return only the existing cheap type and naming heuristic score.
+
+        A non-zero score is used to prioritize expensive analysis. Functions with
+        no cheap evidence remain eligible for the later completeness pass.
+        """
+        res = BoolResult(func)
+        self._add_fast_evidence(func, res)
+        return res.final_score
+
+    def is_fast_candidate(self, func: Function) -> bool:
+        """Whether the cheap existing heuristics identify a priority candidate."""
+        return self.fast_candidate_score(func) > 0
+
+    def analyze_function(self, func: Function) -> BoolResult:
+        res = BoolResult(func)
+        self._add_fast_evidence(func, res)
 
         # HLIL Analysis. Accessing func.hlil can force native decompiler work,
         # so do not request it for a function Binary Ninja has already flagged
@@ -91,14 +116,6 @@ class BoolHunterEngine:
 
         # Signal 4: Caller Analysis (+20)
         self._analyze_callers(func, res)
-
-        # Signal 6: Naming (+10 to +15)
-        name = func.name
-        # Handle Obj-C: -[Class isActive] -> isActive
-        clean_name = name.split(' ')[-1].strip(']') if ' ' in name else name
-        if self.bool_patterns.match(clean_name):
-            bonus = 15 if ' ' in name else 10
-            res.add(bonus, f"Boolean-style naming pattern: '{clean_name}'")
 
         return res
 
