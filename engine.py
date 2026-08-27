@@ -114,14 +114,15 @@ class BoolHunterEngine:
             HighLevelILOperation.HLIL_CMP_SGE,
             HighLevelILOperation.HLIL_CMP_UGE,
         ]
-        normalization_ops = [HighLevelILOperation.HLIL_LNOT]
+        # Binary Ninja represents a high-level logical NOT with HLIL_NOT.
+        normalization_ops = [HighLevelILOperation.HLIL_NOT]
 
         for expr in return_expressions:
             # Direct comparison: return a == b
             if expr.operation in comp_ops:
                 res.add(30, "Return expression is a comparison result")
                 break
-            # Normalization: return !!x (HLIL represents !! as a simplification or LNOT)
+            # Normalization: return !!x (HLIL represents logical NOT as HLIL_NOT).
             if expr.operation in normalization_ops:
                 res.add(30, "Return value is logically normalized (Boolean normalization)")
                 break
