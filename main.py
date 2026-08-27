@@ -2,7 +2,7 @@ from binaryninja import BackgroundTaskThread, BinaryView, PluginCommand
 from binaryninjaui import Sidebar
 
 from .engine import BoolHunterEngine
-from .ui import BoolHunterSidebarWidgetType
+from .ui import BoolHunterSidebarWidget, BoolHunterSidebarWidgetType
 
 
 class HunterTask(BackgroundTaskThread):
@@ -35,6 +35,10 @@ def launch_plugin(bv: BinaryView):
 
     sidebar.activate("BoolHunter")
     sidebar.focus("BoolHunter")
+
+    widget = sidebar.widget("BoolHunter")
+    if isinstance(widget, BoolHunterSidebarWidget):
+        widget.bind_to_active_view()
 
 
 PluginCommand.register("BoolHunter", "Find and index Boolean functions", launch_plugin)

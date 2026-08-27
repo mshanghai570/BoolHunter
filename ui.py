@@ -26,9 +26,58 @@ from PySide6.QtWidgets import (
 class BoolHunterSidebarWidget(SidebarWidget):
     def __init__(self, name, frame, data):
         super().__init__(name)
+        self.frame = frame
         self.bv = data
         self.results = []
         self.setup_ui()
+        self.bind_to_active_view()
+
+    def _set_binary_view(self, bv):
+        """Update the analysis target and discard results from a different view."""
+        if bv is None or bv is self.bv:
+            return
+        try:
+            if bv == self.bv:
+                return
+        except Exception:
+            pass
+
+        self.bv = bv
+        self.results = []
+        self.table.setRowCount(0)
+        self.details.clear()
+
+    def _binary_view_from_frame(self, frame):
+        if frame is None:
+            return None
+
+        try:
+            view = frame.getCurrentViewInterface()
+            return view.getData() if view is not None else None
+        except Exception:
+            return None
+
+    def bind_to_active_view(self):
+        """Bind to the BinaryView active when the sidebar is shown or used."""
+        sidebar = Sidebar.current()
+        if sidebar is not None:
+            active_bv = sidebar.currentData()
+            if active_bv is not None:
+                self._set_binary_view(active_bv)
+                return self.bv
+
+            self.frame = sidebar.currentFrame()
+
+        self._set_binary_view(self._binary_view_from_frame(self.frame))
+        return self.bv
+
+    def notifyViewChanged(self, frame):
+        self.frame = frame
+        self._set_binary_view(self._binary_view_from_frame(frame))
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self.bind_to_active_view()
 
     def setup_ui(self):
         self.layout = QVBoxLayout(self)
@@ -70,6 +119,7 @@ class BoolHunterSidebarWidget(SidebarWidget):
         self.layout.addWidget(self.splitter)
 
     def on_hunt_clicked(self):
+        self.bind_to_active_view()
         if self.bv is None:
             return
 
