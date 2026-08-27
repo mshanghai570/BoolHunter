@@ -1,4 +1,3 @@
-# Binary Ninja UI bindings must be imported before PySide6.
 from binaryninjaui import (
     Sidebar,
     SidebarContextSensitivity,
@@ -11,17 +10,73 @@ from PySide6.QtCore import Qt, QRectF
 from PySide6.QtGui import QColor, QFont, QImage, QPainter
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QDialog,
+    QDialogButtonBox,
+    QFormLayout,
     QHeaderView,
     QHBoxLayout,
+    QLabel,
+    QLineEdit,
     QPushButton,
     QSplitter,
     QTableWidget,
     QTableWidgetItem,
     QTextEdit,
     QVBoxLayout,
-    QLineEdit,
-    QLabel,
 )
+
+from .ai import AIAnalystError, AIProviderConfig
+
+
+class AIConfigDialog(QDialog):
+    """Small session-only configuration dialog for an OpenAI-compatible API."""
+
+    def __init__(self, config=None, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("BoolHunter AI Analyst Settings")
+        self.setModal(True)
+
+        form = QFormLayout(self)
+        self.provider_edit = QLineEdit(config.provider_name if config else "OpenAI-compatible")
+        self.base_url_edit = QLineEdit(config.base_url if config else "")
+        self.base_url_edit.setPlaceholderText("https://api.example.com/v1")
+        self.api_key_edit = QLineEdit(config.api_key if config else "")
+        self.api_key_edit.setEchoMode(QLineEdit.Password)
+        self.model_edit = QLineEdit(config.model if config else "")
+        self.model_edit.setPlaceholderText("Model name")
+        self.timeout_edit = QLineEdit(str(config.timeout_seconds if config else 30))
+
+        form.addRow("Provider (optional):", self.provider_edit)
+        form.addRow("Base URL:", self.base_url_edit)
+        form.addRow("API key:", self.api_key_edit)
+        form.addRow("Model:", self.model_edit)
+        form.addRow("Timeout (seconds):", self.timeout_edit)
+
+        note = QLabel("Configuration is kept only for this BoolHunter session.")
+        note.setWordWrap(True)
+        note.setStyleSheet("color: #a0a0a0;")
+        form.addRow(note)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        form.addRow(buttons)
+
+    def config(self) -> AIProviderConfig:
+        try:
+            timeout_seconds = float(self.timeout_edit.text().strip())
+        except ValueError:
+            raise AIAnalystError("AI Analyst timeout must be a number.")
+
+        config = AIProviderConfig(
+            base_url=self.base_url_edit.text(),
+            api_key=self.api_key_edit.text(),
+            model=self.model_edit.text(),
+            provider_name=self.provider_edit.text().strip() or "OpenAI-compatible",
+            timeout_seconds=timeout_seconds,
+        )
+        config.validate()
+        return config
 
 
 class BoolHunterSidebarWidget(SidebarWidget):
@@ -31,6 +86,9 @@ class BoolHunterSidebarWidget(SidebarWidget):
         self.bv = data
         self.results = []
         self._hunt_task = None
+        self._ai_task = None
+        self._ai_config = None
+        self._ai_interpretations = {}
         self.setup_ui()
         self.bind_to_active_view()
 
@@ -46,8 +104,10 @@ class BoolHunterSidebarWidget(SidebarWidget):
 
         self.bv = bv
         self.results = []
+        self._ai_interpretations = {}
         self.table.setRowCount(0)
         self.details.clear()
+        self.ai_analyze_btn.setEnabled(False)
 
     def _binary_view_from_frame(self, frame):
         if frame is None:
@@ -84,7 +144,7 @@ class BoolHunterSidebarWidget(SidebarWidget):
     def setup_ui(self):
         self.layout = QVBoxLayout(self)
 
-        # Header / Search
+        # Existing Hunt / search controls
         top_row = QHBoxLayout()
         self.hunt_btn = QPushButton("🎯 HUNT")
         self.hunt_btn.clicked.connect(self.on_hunt_clicked)
@@ -101,20 +161,28 @@ class BoolHunterSidebarWidget(SidebarWidget):
         self.status_label.setStyleSheet("color: #a0a0a0; padding: 2px 0;")
         self.layout.addWidget(self.status_label)
 
+        # Optional AI controls are separate from deterministic Hunt controls.
+        ai_row = QHBoxLayout()
+        self.ai_config_btn = QPushButton("Configure AI...")
+        self.ai_config_btn.clicked.connect(self.on_configure_ai)
+        self.ai_analyze_btn = QPushButton("Analyze with AI")
+        self.ai_analyze_btn.setEnabled(False)
+        self.ai_analyze_btn.clicked.connect(self.on_analyze_with_ai)
+        ai_row.addWidget(self.ai_config_btn)
+        ai_row.addWidget(self.ai_analyze_btn)
+        self.layout.addLayout(ai_row)
+
         # Main Content
         self.splitter = QSplitter(Qt.Vertical)
 
-        # Table
         self.table = QTableWidget(0, 3)
         self.table.setHorizontalHeaderLabels(["Function", "Score", "Address"])
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.itemSelectionChanged.connect(self.on_selection_changed)
         self.table.doubleClicked.connect(self.on_double_click)
-
         self.splitter.addWidget(self.table)
 
-        # Details
         self.details = QTextEdit()
         self.details.setReadOnly(True)
         self.details.setStyleSheet(
@@ -132,8 +200,10 @@ class BoolHunterSidebarWidget(SidebarWidget):
         from .main import HunterTask
 
         self.results = []
+        self._ai_interpretations = {}
         self.table.setRowCount(0)
         self.details.clear()
+        self.ai_analyze_btn.setEnabled(False)
         self.hunt_btn.setEnabled(False)
         self.hunt_btn.setText("Hunting...")
         self.status_label.setText("Starting Boolean heuristic screening...")
@@ -214,6 +284,81 @@ class BoolHunterSidebarWidget(SidebarWidget):
         self.status_label.setText(f"{state}: {len(results):,} Boolean candidates found")
         self._hunt_task = None
 
+    def on_configure_ai(self):
+        dialog = AIConfigDialog(self._ai_config, self)
+        if not dialog.exec():
+            return
+        try:
+            self._ai_config = dialog.config()
+        except AIAnalystError as error:
+            self.status_label.setText(f"AI Analyst: {error}")
+            return
+        self.status_label.setText(
+            f"AI Analyst configured: {self._ai_config.provider_name} / {self._ai_config.model}"
+        )
+
+    def _selected_result(self):
+        items = self.table.selectedItems()
+        if not items:
+            return None
+        return items[0].data(Qt.UserRole)
+
+    def on_analyze_with_ai(self):
+        result = self._selected_result()
+        if result is None:
+            self.status_label.setText("AI Analyst: select a BoolHunter result first.")
+            return
+        if self._ai_config is None:
+            self.status_label.setText("AI Analyst: configure an endpoint before analysis.")
+            return
+        try:
+            self._ai_config.validate()
+        except AIAnalystError as error:
+            self.status_label.setText(f"AI Analyst: {error}")
+            return
+
+        from .main import AIAnalysisTask
+
+        self.ai_analyze_btn.setEnabled(False)
+        self.status_label.setText("AI Analyst: preparing selected function context...")
+        task = AIAnalysisTask(
+            result,
+            self._ai_config,
+            lambda analysis, error, cancelled: self.on_ai_complete(
+                task,
+                result,
+                analysis,
+                error,
+                cancelled,
+            ),
+        )
+        self._ai_task = task
+        task.start()
+
+    def on_ai_complete(self, task, result, analysis, error, cancelled):
+        execute_on_main_thread(
+            lambda: self._finish_ai_analysis(task, result, analysis, error, cancelled)
+        )
+
+    def _finish_ai_analysis(self, task, result, analysis, error, cancelled):
+        if task is not self._ai_task:
+            return
+        self._ai_task = None
+        self.ai_analyze_btn.setEnabled(self._selected_result() is not None)
+
+        if cancelled:
+            self.status_label.setText("AI Analyst: cancelled.")
+            return
+        if error:
+            self.status_label.setText(f"AI Analyst: {error}")
+            return
+
+        self._ai_interpretations[result.func.start] = analysis
+        self.status_label.setText("AI Analyst: interpretation complete.")
+        selected = self._selected_result()
+        if selected is result:
+            self._show_selected_analysis(result)
+
     def _add_result_row(self, res, query):
         if query and query not in res.func.name.lower():
             return
@@ -244,20 +389,27 @@ class BoolHunterSidebarWidget(SidebarWidget):
             self._add_result_row(res, query)
 
     def on_selection_changed(self):
-        items = self.table.selectedItems()
-        if not items:
-            return
-        res = items[0].data(Qt.UserRole)
+        result = self._selected_result()
+        self.ai_analyze_btn.setEnabled(result is not None and self._ai_task is None)
+        if result is not None:
+            self._show_selected_analysis(result)
 
-        text = "BOOLHUNTER ANALYSIS\n"
+    def _show_selected_analysis(self, res):
+        text = "BOOLHUNTER DETERMINISTIC ANALYSIS\n"
         text += f"Function:  {res.func.name}\n"
         text += f"Address:   {hex(res.func.start)}\n"
         text += f"Confidence: {res.final_score}%\n"
         text += f"Return:    {res.func.return_type}\n"
-        text += "\nEVIDENCE:\n"
+        text += "\nDETERMINISTIC EVIDENCE:\n"
         for ev in res.evidence_list:
             text += f" ✓ {ev.message} (+{ev.score})\n"
 
+        interpretation = self._ai_interpretations.get(res.func.start)
+        if interpretation:
+            text += "\nAI ANALYST INTERPRETATION (does not alter BoolHunter score):\n"
+            text += interpretation
+        else:
+            text += "\nAI ANALYST: No interpretation requested for this result.\n"
         self.details.setText(text)
 
     def on_double_click(self, index):

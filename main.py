@@ -4,6 +4,12 @@ from typing import Callable, List
 from binaryninja import BackgroundTaskThread, BinaryView, PluginCommand
 from binaryninjaui import Sidebar
 
+from .ai import (
+    AIAnalystError,
+    AIProviderConfig,
+    OpenAICompatibleClient,
+    build_analysis_messages,
+)
 from .engine import BoolHunterEngine, BoolResult
 from .ui import BoolHunterSidebarWidget, BoolHunterSidebarWidgetType
 
@@ -165,6 +171,43 @@ class HunterTask(BackgroundTaskThread):
             len(results),
         )
         self.on_complete(results, self.cancelled)
+
+
+class AIAnalysisTask(BackgroundTaskThread):
+    """Run one optional AI interpretation without altering deterministic results."""
+
+    def __init__(
+        self,
+        result: BoolResult,
+        config: AIProviderConfig,
+        on_complete: Callable,
+        client_factory: Callable = OpenAICompatibleClient,
+    ):
+        super().__init__("BoolHunter AI analysis...", True)
+        self.result = result
+        self.config = config
+        self.on_complete = on_complete
+        self.client_factory = client_factory
+
+    def run(self):
+        if self.cancelled:
+            self.on_complete(None, None, True)
+            return
+
+        try:
+            self.progress = "Preparing BoolHunter context..."
+            messages = build_analysis_messages(self.result)
+            if self.cancelled:
+                self.on_complete(None, None, True)
+                return
+
+            self.progress = "Requesting AI interpretation..."
+            analysis = self.client_factory(self.config).analyze(messages)
+            self.on_complete(analysis, None, self.cancelled)
+        except AIAnalystError as error:
+            self.on_complete(None, str(error), False)
+        except Exception as error:
+            self.on_complete(None, f"Unexpected AI Analyst error: {error}", False)
 
 
 def launch_plugin(bv: BinaryView):
