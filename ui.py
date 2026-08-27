@@ -45,14 +45,21 @@ class AIConfigDialog(QDialog):
         self.model_edit = QLineEdit(config.model if config else "")
         self.model_edit.setPlaceholderText("Model name")
         self.timeout_edit = QLineEdit(str(config.timeout_seconds if config else 30))
+        self.ca_bundle_edit = QLineEdit(config.ca_bundle_path if config else "")
+        self.ca_bundle_edit.setPlaceholderText("/path/to/trusted-ca-bundle.pem (optional)")
 
         form.addRow("Provider (optional):", self.provider_edit)
         form.addRow("Base URL:", self.base_url_edit)
         form.addRow("API key:", self.api_key_edit)
         form.addRow("Model:", self.model_edit)
         form.addRow("Timeout (seconds):", self.timeout_edit)
+        form.addRow("Trusted CA bundle (optional):", self.ca_bundle_edit)
 
-        note = QLabel("Configuration is kept only for this BoolHunter session.")
+        note = QLabel(
+            "Configuration is kept only for this BoolHunter session. A custom CA "
+            "bundle must be a PEM file; TLS certificate and hostname verification "
+            "remain enabled."
+        )
         note.setWordWrap(True)
         note.setStyleSheet("color: #a0a0a0;")
         form.addRow(note)
@@ -74,6 +81,7 @@ class AIConfigDialog(QDialog):
             model=self.model_edit.text(),
             provider_name=self.provider_edit.text().strip() or "OpenAI-compatible",
             timeout_seconds=timeout_seconds,
+            ca_bundle_path=self.ca_bundle_edit.text().strip(),
         )
         config.validate()
         return config

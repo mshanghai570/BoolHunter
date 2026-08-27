@@ -7,6 +7,8 @@ already-scored BoolResult and never changes deterministic evidence or scores.
 from __future__ import annotations
 
 import json
+import os
+import ssl
 from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional, Tuple
 from urllib.error import HTTPError, URLError
@@ -39,6 +41,7 @@ class AIProviderConfig:
     model: str
     provider_name: str = "OpenAI-compatible"
     timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS
+    ca_bundle_path: str = ""
 
     def validate(self) -> None:
         if not self.base_url.strip():
@@ -49,6 +52,8 @@ class AIProviderConfig:
             raise AIAnalystError("AI Analyst is not configured: model name is required.")
         if self.timeout_seconds <= 0:
             raise AIAnalystError("AI Analyst timeout must be greater than zero.")
+        if self.ca_bundle_path.strip() and not os.path.isfile(self.ca_bundle_path.strip()):
+            raise AIAnalystError("AI Analyst CA bundle path does not point to a readable file.")
 
     @property
     def chat_completions_url(self) -> str:
@@ -63,9 +68,33 @@ class AIProviderConfig:
 class OpenAICompatibleClient:
     """Small client for the standard OpenAI-compatible chat-completions API."""
 
-    def __init__(self, config: AIProviderConfig, opener: Callable = urlopen):
+    def __init__(
+        self,
+        config: AIProviderConfig,
+        opener: Callable = urlopen,
+        context_factory: Callable = ssl.create_default_context,
+    ):
         self.config = config
         self.opener = opener
+        self.context_factory = context_factory
+
+    def _tls_context(self):
+        """Build a verified TLS context, optionally augmented by a PEM CA bundle."""
+        try:
+            context = self.context_factory(
+                cafile=self.config.ca_bundle_path.strip() or None
+            )
+            # create_default_context already uses these values; state them
+            # explicitly so a custom context factory cannot weaken TLS checks.
+            context.check_hostname = True
+            context.verify_mode = ssl.CERT_REQUIRED
+            return context
+        except (OSError, ssl.SSLError) as error:
+            raise AIAnalystError(f"Unable to load the AI Analyst CA bundle: {error}")
+
+    @staticmethod
+    def _certificate_error(error) -> bool:
+        return isinstance(error, ssl.SSLCertVerificationError) or "certificate verify failed" in str(error).lower()
 
     def analyze(self, messages: List[Dict[str, str]]) -> str:
         self.config.validate()
@@ -88,7 +117,10 @@ class OpenAICompatibleClient:
         )
 
         try:
-            with self.opener(request, timeout=self.config.timeout_seconds) as response:
+            open_kwargs = {"timeout": self.config.timeout_seconds}
+            if self.opener is urlopen:
+                open_kwargs["context"] = self._tls_context()
+            with self.opener(request, **open_kwargs) as response:
                 raw_response = response.read().decode("utf-8", errors="replace")
         except HTTPError as error:
             detail = _error_body(error)
@@ -100,7 +132,27 @@ class OpenAICompatibleClient:
             raise AIAnalystError(message)
         except TimeoutError:
             raise AIAnalystError("AI request timed out. Please try again or increase the timeout.")
+        except ssl.SSLCertVerificationError:
+            raise AIAnalystError(
+                "TLS certificate verification failed. BoolHunter kept verification "
+                "enabled; verify the endpoint certificate chain or configure its PEM "
+                "CA bundle in Configure AI…."
+            )
+        except ssl.SSLError as error:
+            if self._certificate_error(error):
+                raise AIAnalystError(
+                    "TLS certificate verification failed. BoolHunter kept verification "
+                    "enabled; verify the endpoint certificate chain or configure its PEM "
+                    "CA bundle in Configure AI…."
+                )
+            raise AIAnalystError(f"TLS connection failed: {error}")
         except URLError as error:
+            if self._certificate_error(error.reason):
+                raise AIAnalystError(
+                    "TLS certificate verification failed. BoolHunter kept verification "
+                    "enabled; verify the endpoint certificate chain or configure its PEM "
+                    "CA bundle in Configure AI…."
+                )
             raise AIAnalystError(f"AI request failed: {error.reason}")
         except OSError as error:
             raise AIAnalystError(f"AI request failed: {error}")
