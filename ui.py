@@ -207,8 +207,10 @@ class BoolHunterSidebarWidgetType(SidebarWidgetType):
         return SidebarWidgetLocation.RightContent
 
     def contextSensitivity(self):
-        # Each Binary Ninja tab receives its own result set and associated BinaryView.
-        return SidebarContextSensitivity.PerTabSidebarContext
+        # Keep one widget alive and update its target from notifyViewChanged and
+        # the active sidebar context. This avoids Binary Ninja's no-file fallback
+        # when the sidebar is created before a per-tab context is available.
+        return SidebarContextSensitivity.SelfManagedSidebarContext
 
 
 # Register the UI at load time using the supported sidebar API.
