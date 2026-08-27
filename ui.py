@@ -1,17 +1,32 @@
-from PySide6.QtWidgets import (
-    QVBoxLayout, QHBoxLayout, QPushButton, QTableWidget, 
-    QTableWidgetItem, QHeaderView, QWidget, QLabel, 
-    QAbstractItemView, QSplitter, QTextEdit, QLineEdit
+# Binary Ninja UI bindings must be imported before PySide6.
+from binaryninjaui import (
+    Sidebar,
+    SidebarContextSensitivity,
+    SidebarWidget,
+    SidebarWidgetLocation,
+    SidebarWidgetType,
 )
-from PySide6.QtCore import Qt
-from binaryninjaui import DockContextHandler, DockHandler
-from binaryninja import BinaryView, execute_on_main_thread
+from binaryninja import execute_on_main_thread
+from PySide6.QtCore import Qt, QRectF
+from PySide6.QtGui import QColor, QFont, QImage, QPainter
+from PySide6.QtWidgets import (
+    QAbstractItemView,
+    QHeaderView,
+    QHBoxLayout,
+    QPushButton,
+    QSplitter,
+    QTableWidget,
+    QTableWidgetItem,
+    QTextEdit,
+    QVBoxLayout,
+    QLineEdit,
+)
 
-class BoolHunterDockWidget(QWidget, DockContextHandler):
-    def __init__(self, parent, name, bv):
-        QWidget.__init__(self, parent)
-        DockContextHandler.__init__(self, self, name)
-        self.bv = bv
+
+class BoolHunterSidebarWidget(SidebarWidget):
+    def __init__(self, name, frame, data):
+        super().__init__(name)
+        self.bv = data
         self.results = []
         self.setup_ui()
 
@@ -22,7 +37,7 @@ class BoolHunterDockWidget(QWidget, DockContextHandler):
         top_row = QHBoxLayout()
         self.hunt_btn = QPushButton("🎯 HUNT")
         self.hunt_btn.clicked.connect(self.on_hunt_clicked)
-        
+
         self.filter_edit = QLineEdit()
         self.filter_edit.setPlaceholderText("Filter results...")
         self.filter_edit.textChanged.connect(self.refresh_table)
@@ -41,19 +56,25 @@ class BoolHunterDockWidget(QWidget, DockContextHandler):
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.itemSelectionChanged.connect(self.on_selection_changed)
         self.table.doubleClicked.connect(self.on_double_click)
-        
+
         self.splitter.addWidget(self.table)
 
         # Details
         self.details = QTextEdit()
         self.details.setReadOnly(True)
-        self.details.setStyleSheet("background-color: #2a2a2a; color: #e0e0e0; font-family: monospace;")
+        self.details.setStyleSheet(
+            "background-color: #2a2a2a; color: #e0e0e0; font-family: monospace;"
+        )
         self.splitter.addWidget(self.details)
 
         self.layout.addWidget(self.splitter)
 
     def on_hunt_clicked(self):
+        if self.bv is None:
+            return
+
         from .main import HunterTask
+
         self.hunt_btn.setEnabled(False)
         self.hunt_btn.setText("Hunting...")
         task = HunterTask(self.bv, self.on_hunt_complete)
@@ -68,23 +89,25 @@ class BoolHunterDockWidget(QWidget, DockContextHandler):
     def refresh_table(self):
         query = self.filter_edit.text().lower()
         self.table.setRowCount(0)
-        
+
         # Sort by score descending
         sorted_res = sorted(self.results, key=lambda x: x.final_score, reverse=True)
-        
+
         for res in sorted_res:
             if query and query not in res.func.name.lower():
                 continue
-            
+
             row = self.table.rowCount()
             self.table.insertRow(row)
-            
+
             name_item = QTableWidgetItem(res.func.name)
             name_item.setData(Qt.UserRole, res)
-            
+
             score_item = QTableWidgetItem(f"{res.final_score}%")
-            if res.final_score >= 90: score_item.setForeground(Qt.green)
-            elif res.final_score >= 70: score_item.setForeground(Qt.cyan)
+            if res.final_score >= 90:
+                score_item.setForeground(Qt.green)
+            elif res.final_score >= 70:
+                score_item.setForeground(Qt.cyan)
 
             self.table.setItem(row, 0, name_item)
             self.table.setItem(row, 1, score_item)
@@ -92,10 +115,11 @@ class BoolHunterDockWidget(QWidget, DockContextHandler):
 
     def on_selection_changed(self):
         items = self.table.selectedItems()
-        if not items: return
+        if not items:
+            return
         res = items[0].data(Qt.UserRole)
-        
-        text = f"BOOLHUNTER ANALYSIS\n"
+
+        text = "BOOLHUNTER ANALYSIS\n"
         text += f"Function:  {res.func.name}\n"
         text += f"Address:   {hex(res.func.start)}\n"
         text += f"Confidence: {res.final_score}%\n"
@@ -103,9 +127,39 @@ class BoolHunterDockWidget(QWidget, DockContextHandler):
         text += "\nEVIDENCE:\n"
         for ev in res.evidence_list:
             text += f" ✓ {ev.message} (+{ev.score})\n"
-            
+
         self.details.setText(text)
 
     def on_double_click(self, index):
         res = self.table.item(index.row(), 0).data(Qt.UserRole)
         self.bv.navigate(self.bv.view, res.func.start)
+
+
+class BoolHunterSidebarWidgetType(SidebarWidgetType):
+    def __init__(self):
+        # Sidebar icons are 28x28 points; provide a HiDPI-ready 56x56 image.
+        icon = QImage(56, 56, QImage.Format_RGB32)
+        icon.fill(0)
+
+        painter = QPainter()
+        painter.begin(icon)
+        painter.setFont(QFont("Open Sans", 44))
+        painter.setPen(QColor(255, 255, 255, 255))
+        painter.drawText(QRectF(0, 0, 56, 56), Qt.AlignCenter, "B")
+        painter.end()
+
+        super().__init__(icon, "BoolHunter")
+
+    def createWidget(self, frame, data):
+        return BoolHunterSidebarWidget("BoolHunter", frame, data)
+
+    def defaultLocation(self):
+        return SidebarWidgetLocation.RightContent
+
+    def contextSensitivity(self):
+        # Each Binary Ninja tab receives its own result set and associated BinaryView.
+        return SidebarContextSensitivity.PerTabSidebarContext
+
+
+# Register the UI at load time using the supported sidebar API.
+Sidebar.addSidebarWidgetType(BoolHunterSidebarWidgetType())
