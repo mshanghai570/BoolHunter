@@ -10,6 +10,7 @@ from .ai import (
     OpenAICompatibleClient,
     build_analysis_messages,
     build_search_messages,
+    category_search_addresses,
     parse_search_addresses,
 )
 from .engine import BoolHunterEngine, BoolResult
@@ -246,6 +247,12 @@ class AISearchTask(BackgroundTaskThread):
             self.progress = "Searching with configured AI provider..."
             response = self.client_factory(self.config).analyze(messages)
             matches = parse_search_addresses(response, allowed_addresses)
+
+            # Category requests have a deterministic answer from BoolHunter's
+            # own labels. Use it when a provider returns no usable addresses so
+            # a category search remains reliable across provider response styles.
+            if not matches:
+                matches = category_search_addresses(self.query, self.results)
             self.on_complete(matches, None, self.cancelled)
         except AIAnalystError as error:
             self.on_complete([], str(error), False)

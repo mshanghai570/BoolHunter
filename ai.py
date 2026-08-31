@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import ssl
 from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional, Tuple
@@ -19,6 +20,36 @@ MAX_PSEUDOCODE_CHARS = 12_000
 MAX_CONTEXT_FUNCTIONS = 16
 MAX_SEARCH_RESULTS = 200
 DEFAULT_TIMEOUT_SECONDS = 30.0
+
+SEARCH_CATEGORY_TERMS = {
+    "Purchases": (
+        "purchase", "purchases", "buy", "checkout", "cart", "order",
+        "transaction", "payment", "payments", "billing", "subscription", "receipt",
+    ),
+    "Authentication & Security": (
+        "authentication", "auth", "login", "logout", "password", "token",
+        "security", "secure", "permission", "biometric",
+    ),
+    "Network & Communication": (
+        "network", "request", "response", "http", "socket", "upload",
+        "download", "connect", "message", "sync",
+    ),
+    "Files & Storage": (
+        "file", "files", "storage", "database", "cache", "document", "save", "load",
+    ),
+    "UI & Interaction": (
+        "ui", "user interface", "view", "screen", "button", "menu", "click", "tap",
+    ),
+    "Navigation & Location": (
+        "navigation", "navigate", "route", "redirect", "location", "map", "gps", "address",
+    ),
+    "Media": (
+        "media", "audio", "video", "image", "photo", "camera", "record", "stream",
+    ),
+    "Validation & State": (
+        "validation", "validate", "verification", "verify", "check", "enabled", "active", "exists",
+    ),
+}
 
 
 class AIAnalystError(Exception):
@@ -214,10 +245,43 @@ def _available_hlil_text(func) -> str:
     return text
 
 
+def category_search_addresses(query: str, results) -> List[int]:
+    """Return exact candidate addresses for an explicit category request."""
+    lowered_query = query.casefold()
+    requested_categories = {
+        category
+        for category, terms in SEARCH_CATEGORY_TERMS.items()
+        if any(
+            re.search(r"(?<!\w)" + re.escape(term) + r"(?!\w)", lowered_query)
+            for term in terms
+        )
+    }
+    if not requested_categories:
+        return []
+    return [
+        result.func.start
+        for result in results
+        if getattr(result, "category", "Other") in requested_categories
+    ]
+
+
+def _search_context_results(query: str, results):
+    """Prioritize category matches before applying the bounded AI context limit."""
+    category_addresses = set(category_search_addresses(query, results))
+    prioritized = [
+        result for result in results if result.func.start in category_addresses
+    ]
+    prioritized.extend(
+        result for result in results
+        if result.func.start not in category_addresses
+    )
+    return prioritized[:MAX_SEARCH_RESULTS]
+
+
 def build_search_messages(query: str, results) -> List[Dict[str, str]]:
     """Build a bounded prompt for optional natural-language result search."""
     candidates = []
-    for result in list(results)[:MAX_SEARCH_RESULTS]:
+    for result in _search_context_results(query, results):
         func = result.func
         candidates.append({
             "name": func.name,
