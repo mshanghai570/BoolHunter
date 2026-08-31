@@ -99,6 +99,7 @@ class BoolHunterSidebarWidget(SidebarWidget):
         self._ai_config = None
         self._ai_interpretations = {}
         self._ai_search_addresses = None
+        self._ai_search_query = ""
         self.setup_ui()
         self.bind_to_active_view()
 
@@ -116,6 +117,7 @@ class BoolHunterSidebarWidget(SidebarWidget):
         self.results = []
         self._ai_interpretations = {}
         self._ai_search_addresses = None
+        self._ai_search_query = ""
         self.ai_search_clear_btn.setEnabled(False)
         self.table.setRowCount(0)
         self.details.clear()
@@ -206,6 +208,19 @@ class BoolHunterSidebarWidget(SidebarWidget):
         ai_search_row.addWidget(self.ai_search_clear_btn)
         self.layout.addLayout(ai_search_row)
 
+        self.ai_results_panel = QTextEdit()
+        self.ai_results_panel.setReadOnly(True)
+        self.ai_results_panel.setMaximumHeight(150)
+        self.ai_results_panel.setStyleSheet(
+            "background-color: #202b36; color: #d9edf7; "
+            "font-family: monospace; padding: 4px;"
+        )
+        self.ai_results_panel.setPlainText(
+            "AI SEARCH RESULTS\n"
+            "Run Ask AI to find related functions in the current Hunt results."
+        )
+        self.layout.addWidget(self.ai_results_panel)
+
         # Main Content
         self.splitter = QSplitter(Qt.Vertical)
 
@@ -253,6 +268,7 @@ class BoolHunterSidebarWidget(SidebarWidget):
         self.results = []
         self._ai_interpretations = {}
         self._ai_search_addresses = None
+        self._ai_search_query = ""
         self.ai_search_clear_btn.setEnabled(False)
         self.table.setRowCount(0)
         self.details.clear()
@@ -464,16 +480,60 @@ class BoolHunterSidebarWidget(SidebarWidget):
             return
 
         self._ai_search_addresses = set(addresses)
+        self._ai_search_query = task.query
         self.ai_search_clear_btn.setEnabled(True)
         self.refresh_table()
+        self._update_ai_results_panel()
+
+        # Make the AI output immediately visible: select and center the first
+        # matching row so its full deterministic analysis appears below.
+        if addresses:
+            for row in range(self.table.rowCount()):
+                item = self.table.item(row, 3)
+                if item is not None and item.text().lower() == hex(addresses[0]).lower():
+                    self.table.selectRow(row)
+                    self.table.scrollToItem(
+                        self.table.item(row, 0), QAbstractItemView.PositionAtCenter
+                    )
+                    break
         self.status_label.setText(
-            f"AI Search: {len(addresses):,} matching function(s) found."
+            f"AI Search: {len(addresses):,} matching function(s) found. "
+            "Matches are highlighted below."
         )
+
+    def _update_ai_results_panel(self):
+        if self._ai_search_addresses is None:
+            self.ai_results_panel.setPlainText(
+                "AI SEARCH RESULTS\n"
+                "Run Ask AI to find related functions in the current Hunt results."
+            )
+            return
+
+        matches = [
+            result for result in self.results
+            if result.func.start in self._ai_search_addresses
+        ]
+        lines = [
+            f"AI SEARCH RESULTS ({len(matches):,} MATCHES)",
+            f"Request: {self._ai_search_query}",
+        ]
+        if not matches:
+            lines.append("No matching functions were found in the current Hunt results.")
+        else:
+            lines.append("Matched functions (select a row for full analysis):")
+            for result in sorted(matches, key=lambda item: item.final_score, reverse=True):
+                lines.append(
+                    f"  {result.func.name} | {getattr(result, 'category', 'Other')} | "
+                    f"{result.final_score}% | {hex(result.func.start)}"
+                )
+        self.ai_results_panel.setPlainText("\n".join(lines))
 
     def clear_ai_search(self):
         self._ai_search_addresses = None
+        self._ai_search_query = ""
         self.ai_search_clear_btn.setEnabled(False)
         self.refresh_table()
+        self._update_ai_results_panel()
         self.status_label.setText("AI Search: filter cleared.")
 
     def _add_result_row(self, res, query):
@@ -506,6 +566,10 @@ class BoolHunterSidebarWidget(SidebarWidget):
         self.table.setItem(row, 2, score_item)
         self.table.setItem(row, 3, QTableWidgetItem(hex(res.func.start)))
 
+        if self._ai_search_addresses is not None:
+            for column in range(self.table.columnCount()):
+                self.table.item(row, column).setBackground(QColor("#3b2f12"))
+
     def refresh_table(self):
         query = self.filter_edit.text().lower()
         self.table.setRowCount(0)
@@ -514,6 +578,7 @@ class BoolHunterSidebarWidget(SidebarWidget):
         # search filtering or hunt completion. Live batches append efficiently.
         for res in sorted(self.results, key=lambda x: x.final_score, reverse=True):
             self._add_result_row(res, query)
+        self._update_ai_results_panel()
 
     def on_selection_changed(self):
         result = self._selected_result()
