@@ -318,17 +318,23 @@ def build_search_messages(query: str, results) -> List[Dict[str, str]]:
 
 
 def parse_search_addresses(response: str, allowed_addresses) -> List[int]:
-    """Extract only candidate addresses from the model's JSON response."""
+    """Extract only candidate addresses from common provider response styles."""
     text = response.strip()
     if text.startswith("```"):
         lines = text.splitlines()
-        text = "\n".join(line for line in lines if not line.strip().startswith("``"))
+        text = "\n".join(line for line in lines if not line.strip().startswith("```"))
 
+    addresses = None
     try:
         payload = json.loads(text)
-        addresses = payload.get("addresses", [])
-    except (json.JSONDecodeError, AttributeError):
-        raise AIAnalystError("AI search returned an unexpected response format.")
+        if isinstance(payload, dict):
+            addresses = payload.get("addresses", payload.get("matches", []))
+        elif isinstance(payload, list):
+            addresses = payload
+    except json.JSONDecodeError:
+        # Some compatible providers append a short explanation despite the
+        # requested JSON-only format. Extract only hexadecimal candidates.
+        addresses = re.findall(r"0x[0-9a-fA-F]+", text)
 
     if not isinstance(addresses, list):
         raise AIAnalystError("AI search returned an invalid address list.")
@@ -336,12 +342,15 @@ def parse_search_addresses(response: str, allowed_addresses) -> List[int]:
     allowed = set(allowed_addresses)
     matches = []
     for address in addresses:
-        if not isinstance(address, str):
-            continue
         try:
-            value = int(address, 0)
-        except ValueError:
-            continue
+            if isinstance(address, int):
+                value = address
+            elif isinstance(address, str):
+                value = int(address, 0)
+            else:
+                value = None
+        except (TypeError, ValueError):
+            value = None
         if value in allowed and value not in matches:
             matches.append(value)
     return matches

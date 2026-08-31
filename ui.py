@@ -110,6 +110,13 @@ class BoolHunterSidebarWidget(SidebarWidget):
         try:
             if bv == self.bv:
                 return
+            # Binary Ninja may expose a fresh Python wrapper for the same open
+            # file after navigation. Do not discard results in that case.
+            new_file = getattr(bv, "file", None)
+            current_file = getattr(self.bv, "file", None)
+            if new_file is not None and new_file is current_file:
+                self.bv = bv
+                return
         except Exception:
             pass
 
