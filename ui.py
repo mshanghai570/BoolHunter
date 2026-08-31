@@ -185,7 +185,23 @@ class BoolHunterSidebarWidget(SidebarWidget):
 
         self.table = QTableWidget(0, 3)
         self.table.setHorizontalHeaderLabels(["Function", "Score", "Address"])
-        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+
+        # Keep the result columns wide enough to inspect, while allowing the
+        # sidebar to expose them through its horizontal scrollbar when the
+        # available width is smaller than the content.
+        header = self.table.horizontalHeader()
+        header.setSectionResizeMode(QHeaderView.Interactive)
+        header.setMinimumSectionSize(96)
+        header.setDefaultSectionSize(180)
+        header.setStretchLastSection(False)
+        header.setSectionsMovable(True)
+        header.resizeSection(0, 320)
+        header.resizeSection(1, 120)
+        header.resizeSection(2, 180)
+        self.table.setHorizontalScrollMode(QAbstractItemView.ScrollPerPixel)
+        self.table.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.table.setWordWrap(False)
+        self.table.setTextElideMode(Qt.ElideNone)
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.itemSelectionChanged.connect(self.on_selection_changed)
         self.table.doubleClicked.connect(self.on_double_click)
