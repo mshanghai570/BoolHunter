@@ -20,7 +20,7 @@ Categories are inferred from recognizable words in the function symbol, includin
 
 ## Optional AI Search
 
-After running **HUNT**, configure an OpenAI-compatible provider with **Configure AI...** and enter its base URL, API key, and model name. Then enter a natural-language request in the AI Search field, such as `functions that validate purchases`, and select **AI Search**. BoolHunter sends a bounded list of current candidates containing function names, addresses, categories, and deterministic scores; the provider returns matching candidate addresses, which BoolHunter uses to filter the table.
+After running **HUNT**, configure an OpenAI-compatible provider with **Configure AI...** and enter its base URL, API key, and model name. Then type a conversational request into the **Ask AI** field, such as `find purchase related functions`, `show functions that validate payments`, or another natural-language description, and press **Enter** or select **Ask AI**. BoolHunter sends a bounded list of current candidates containing function names, addresses, categories, and deterministic scores; the provider returns matching candidate addresses, which BoolHunter uses to filter the table.
 
 AI Search is opt-in and runs separately from deterministic analysis. It does not change scores, evidence, categories, or result ranking. Credentials are held only for the current plugin session, and the response is restricted to addresses already present in the candidate list. Use **Clear AI Search** to restore the complete deterministic result set.
 

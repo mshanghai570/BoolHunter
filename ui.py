@@ -187,9 +187,16 @@ class BoolHunterSidebarWidget(SidebarWidget):
         ai_search_row = QHBoxLayout()
         self.ai_search_edit = QLineEdit()
         self.ai_search_edit.setPlaceholderText(
-            "Optional AI search, e.g. 'functions that validate purchases'..."
+            "Ask AI: find purchase related functions..."
         )
-        self.ai_search_btn = QPushButton("AI Search")
+        self.ai_search_edit.setToolTip(
+            "Type a request such as 'find purchase related functions' and press Enter."
+        )
+        self.ai_search_edit.returnPressed.connect(self.on_ai_search_clicked)
+        self.ai_search_btn = QPushButton("Ask AI")
+        self.ai_search_btn.setToolTip(
+            "Search the current Hunt results using your natural-language request."
+        )
         self.ai_search_btn.clicked.connect(self.on_ai_search_clicked)
         self.ai_search_clear_btn = QPushButton("Clear AI Search")
         self.ai_search_clear_btn.setEnabled(False)
