@@ -183,8 +183,8 @@ class BoolHunterSidebarWidget(SidebarWidget):
         # Main Content
         self.splitter = QSplitter(Qt.Vertical)
 
-        self.table = QTableWidget(0, 3)
-        self.table.setHorizontalHeaderLabels(["Function", "Score", "Address"])
+        self.table = QTableWidget(0, 4)
+        self.table.setHorizontalHeaderLabels(["Function", "Category", "Score", "Address"])
 
         # Keep the result columns wide enough to inspect, while allowing the
         # sidebar to expose them through its horizontal scrollbar when the
@@ -196,8 +196,9 @@ class BoolHunterSidebarWidget(SidebarWidget):
         header.setStretchLastSection(False)
         header.setSectionsMovable(True)
         header.resizeSection(0, 320)
-        header.resizeSection(1, 120)
-        header.resizeSection(2, 180)
+        header.resizeSection(1, 220)
+        header.resizeSection(2, 120)
+        header.resizeSection(3, 180)
         self.table.setHorizontalScrollMode(QAbstractItemView.ScrollPerPixel)
         self.table.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.table.setWordWrap(False)
@@ -322,10 +323,11 @@ class BoolHunterSidebarWidget(SidebarWidget):
         )
 
     def _selected_result(self):
-        items = self.table.selectedItems()
-        if not items:
+        row = self.table.currentRow()
+        if row < 0:
             return None
-        return items[0].data(Qt.UserRole)
+        item = self.table.item(row, 0)
+        return item.data(Qt.UserRole) if item is not None else None
 
     def on_analyze_with_ai(self):
         result = self._selected_result()
@@ -384,7 +386,9 @@ class BoolHunterSidebarWidget(SidebarWidget):
             self._show_selected_analysis(result)
 
     def _add_result_row(self, res, query):
-        if query and query not in res.func.name.lower():
+        category = getattr(res, "category", "Other")
+        searchable_text = f"{res.func.name} {category}".lower()
+        if query and query not in searchable_text:
             return
 
         row = self.table.rowCount()
@@ -393,6 +397,8 @@ class BoolHunterSidebarWidget(SidebarWidget):
         name_item = QTableWidgetItem(res.func.name)
         name_item.setData(Qt.UserRole, res)
 
+        category_item = QTableWidgetItem(category)
+
         score_item = QTableWidgetItem(f"{res.final_score}%")
         if res.final_score >= 90:
             score_item.setForeground(Qt.green)
@@ -400,8 +406,9 @@ class BoolHunterSidebarWidget(SidebarWidget):
             score_item.setForeground(Qt.cyan)
 
         self.table.setItem(row, 0, name_item)
-        self.table.setItem(row, 1, score_item)
-        self.table.setItem(row, 2, QTableWidgetItem(hex(res.func.start)))
+        self.table.setItem(row, 1, category_item)
+        self.table.setItem(row, 2, score_item)
+        self.table.setItem(row, 3, QTableWidgetItem(hex(res.func.start)))
 
     def refresh_table(self):
         query = self.filter_edit.text().lower()
@@ -423,6 +430,7 @@ class BoolHunterSidebarWidget(SidebarWidget):
         text += f"Function:  {res.func.name}\n"
         text += f"Address:   {hex(res.func.start)}\n"
         text += f"Confidence: {res.final_score}%\n"
+        text += f"Category:  {getattr(res, 'category', 'Other')}\n"
         text += f"Return:    {res.func.return_type}\n"
         text += "\nDETERMINISTIC EVIDENCE:\n"
         for ev in res.evidence_list:

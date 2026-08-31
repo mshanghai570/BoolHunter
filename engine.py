@@ -22,6 +22,7 @@ class BoolResult:
         self.func = func
         self.score = 0
         self.evidence_list: List[Evidence] = []
+        self.category = "Other"
 
     def add(self, score: int, message: str):
         self.score += score
@@ -44,6 +45,60 @@ class BoolHunterEngine:
     MAX_CALLER_HLIL_SECONDS = 0.25
     MAX_HLIL_PARENT_DEPTH = 128
     MAX_CONDITIONAL_USES = 8
+
+    # Categories are intentionally conservative and based on recognizable
+    # function-name vocabulary. The Boolean confidence score remains separate
+    # from categorization so labels never affect candidate ranking.
+    CATEGORY_PATTERNS = (
+        ("Purchases", re.compile(
+            r"(?:purchase|buy|checkout|cart|order|transaction|payment|pay|"
+            r"billing|subscribe|subscription|receipt|in[_-]?app|store)", re.IGNORECASE
+        )),
+        ("Authentication & Security", re.compile(
+            r"(?:login|log[_-]?in|logout|log[_-]?out|auth|password|credential|"
+            r"token|session|secure|encrypt|decrypt|permission|authorize|biometric)",
+            re.IGNORECASE,
+        )),
+        ("Network & Communication", re.compile(
+            r"(?:http|https|url|request|response|fetch|download|upload|socket|"
+            r"network|connect|connection|wifi|bluetooth|message|send|receive|sync)",
+            re.IGNORECASE,
+        )),
+        ("Files & Storage", re.compile(
+            r"(?:file|read|write|save|load|cache|document|path|directory|folder|"
+            r"storage|database|sqlite|persist|serialize|deserialize)", re.IGNORECASE
+        )),
+        ("UI & Interaction", re.compile(
+            r"(?:view|window|screen|button|menu|dialog|display|render|draw|click|"
+            r"tap|gesture|touch|highlight|focus|visible)", re.IGNORECASE
+        )),
+        ("Navigation & Location", re.compile(
+            r"(?:navigate|navigation|route|redirect|location|coordinate|map|gps|"
+            r"latitude|longitude|address)", re.IGNORECASE
+        )),
+        ("Media", re.compile(
+            r"(?:audio|video|image|photo|camera|microphone|record|play|pause|"
+            r"stream|media|frame)", re.IGNORECASE
+        )),
+        ("Validation & State", re.compile(
+            r"(?:valid|invalid|check|verify|validate|is[_-]?ready|enabled|active|"
+            r"available|exists|empty|contains|supports|allows)", re.IGNORECASE
+        )),
+    )
+
+    @classmethod
+    def _category_for_name(cls, name: str) -> str:
+        # Split camelCase while preserving underscores used by common symbol
+        # names, then require term boundaries to avoid labels such as
+        # Purchases for unrelated names like ``restoreState``.
+        normalized_name = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", name)
+        for category, pattern in cls.CATEGORY_PATTERNS:
+            for match in pattern.finditer(normalized_name):
+                before = normalized_name[match.start() - 1] if match.start() else ""
+                after = normalized_name[match.end()] if match.end() < len(normalized_name) else ""
+                if not before.isalnum() and not after.isalnum():
+                    return category
+        return "Other"
 
     def __init__(self, bv: BinaryView):
         self.bv = bv
@@ -81,6 +136,7 @@ class BoolHunterEngine:
         name = func.name
         # Handle Obj-C: -[Class isActive] -> isActive
         clean_name = name.split(' ')[-1].strip(']') if ' ' in name else name
+        res.category = self._category_for_name(clean_name)
         if self.bool_patterns.match(clean_name):
             bonus = 15 if ' ' in name else 10
             res.add(bonus, f"Boolean-style naming pattern: '{clean_name}'")
