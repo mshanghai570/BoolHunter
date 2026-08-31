@@ -18,6 +18,14 @@ BoolHunter is a Binary Ninja plugin that identifies Boolean-returning functions 
 
 Categories are inferred from recognizable words in the function symbol, including common `camelCase`, underscore, Objective-C, and hyphenated naming styles. Purchase-related terms such as `purchase`, `checkout`, `cart`, `order`, `transaction`, `payment`, `billing`, `subscription`, and `receipt` map to **Purchases**. The category is informational only and does not change the Boolean confidence score or result ranking. Search filtering also matches category labels.
 
+## Optional AI Search
+
+After running **HUNT**, configure an OpenAI-compatible provider with **Configure AI...** and enter its base URL, API key, and model name. Then enter a natural-language request in the AI Search field, such as `functions that validate purchases`, and select **AI Search**. BoolHunter sends a bounded list of current candidates containing function names, addresses, categories, and deterministic scores; the provider returns matching candidate addresses, which BoolHunter uses to filter the table.
+
+AI Search is opt-in and runs separately from deterministic analysis. It does not change scores, evidence, categories, or result ranking. Credentials are held only for the current plugin session, and the response is restricted to addresses already present in the candidate list. Use **Clear AI Search** to restore the complete deterministic result set.
+
+Any provider implementing the standard OpenAI-compatible `/v1/chat/completions` request and response format can be used. The Base URL may be entered as the provider root, its `/v1` endpoint, or the complete `/chat/completions` URL.
+
 ## Scoring Algorithm
 - **Explicit Type**: +60 (e.g., `bool` or `BOOL`)
 - **All paths return 0/1**: +35

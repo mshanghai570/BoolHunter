@@ -9,6 +9,8 @@ from .ai import (
     AIProviderConfig,
     OpenAICompatibleClient,
     build_analysis_messages,
+    build_search_messages,
+    parse_search_addresses,
 )
 from .engine import BoolHunterEngine, BoolResult
 from .ui import BoolHunterSidebarWidget, BoolHunterSidebarWidgetType
@@ -208,6 +210,47 @@ class AIAnalysisTask(BackgroundTaskThread):
             self.on_complete(None, str(error), False)
         except Exception as error:
             self.on_complete(None, f"Unexpected AI Analyst error: {error}", False)
+
+
+class AISearchTask(BackgroundTaskThread):
+    """Run an optional natural-language search without changing result scores."""
+
+    def __init__(
+        self,
+        query: str,
+        results: List[BoolResult],
+        config: AIProviderConfig,
+        on_complete: Callable,
+        client_factory: Callable = OpenAICompatibleClient,
+    ):
+        super().__init__("BoolHunter AI search...", True)
+        self.query = query
+        self.results = list(results)
+        self.config = config
+        self.on_complete = on_complete
+        self.client_factory = client_factory
+
+    def run(self):
+        if self.cancelled:
+            self.on_complete([], None, True)
+            return
+
+        try:
+            self.progress = "Preparing AI search context..."
+            messages = build_search_messages(self.query, self.results)
+            allowed_addresses = [result.func.start for result in self.results]
+            if self.cancelled:
+                self.on_complete([], None, True)
+                return
+
+            self.progress = "Searching with configured AI provider..."
+            response = self.client_factory(self.config).analyze(messages)
+            matches = parse_search_addresses(response, allowed_addresses)
+            self.on_complete(matches, None, self.cancelled)
+        except AIAnalystError as error:
+            self.on_complete([], str(error), False)
+        except Exception as error:
+            self.on_complete([], f"Unexpected AI Search error: {error}", False)
 
 
 def launch_plugin(bv: BinaryView):

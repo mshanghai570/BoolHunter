@@ -95,8 +95,10 @@ class BoolHunterSidebarWidget(SidebarWidget):
         self.results = []
         self._hunt_task = None
         self._ai_task = None
+        self._ai_search_task = None
         self._ai_config = None
         self._ai_interpretations = {}
+        self._ai_search_addresses = None
         self.setup_ui()
         self.bind_to_active_view()
 
@@ -113,6 +115,8 @@ class BoolHunterSidebarWidget(SidebarWidget):
         self.bv = bv
         self.results = []
         self._ai_interpretations = {}
+        self._ai_search_addresses = None
+        self.ai_search_clear_btn.setEnabled(False)
         self.table.setRowCount(0)
         self.details.clear()
         self.ai_analyze_btn.setEnabled(False)
@@ -180,6 +184,21 @@ class BoolHunterSidebarWidget(SidebarWidget):
         ai_row.addWidget(self.ai_analyze_btn)
         self.layout.addLayout(ai_row)
 
+        ai_search_row = QHBoxLayout()
+        self.ai_search_edit = QLineEdit()
+        self.ai_search_edit.setPlaceholderText(
+            "Optional AI search, e.g. 'functions that validate purchases'..."
+        )
+        self.ai_search_btn = QPushButton("AI Search")
+        self.ai_search_btn.clicked.connect(self.on_ai_search_clicked)
+        self.ai_search_clear_btn = QPushButton("Clear AI Search")
+        self.ai_search_clear_btn.setEnabled(False)
+        self.ai_search_clear_btn.clicked.connect(self.clear_ai_search)
+        ai_search_row.addWidget(self.ai_search_edit)
+        ai_search_row.addWidget(self.ai_search_btn)
+        ai_search_row.addWidget(self.ai_search_clear_btn)
+        self.layout.addLayout(ai_search_row)
+
         # Main Content
         self.splitter = QSplitter(Qt.Vertical)
 
@@ -226,6 +245,8 @@ class BoolHunterSidebarWidget(SidebarWidget):
 
         self.results = []
         self._ai_interpretations = {}
+        self._ai_search_addresses = None
+        self.ai_search_clear_btn.setEnabled(False)
         self.table.setRowCount(0)
         self.details.clear()
         self.ai_analyze_btn.setEnabled(False)
@@ -385,7 +406,75 @@ class BoolHunterSidebarWidget(SidebarWidget):
         if selected is result:
             self._show_selected_analysis(result)
 
+    def on_ai_search_clicked(self):
+        query = self.ai_search_edit.text().strip()
+        if not query:
+            self.status_label.setText("AI Search: enter a natural-language query first.")
+            return
+        if not self.results:
+            self.status_label.setText("AI Search: run Hunt before searching its results.")
+            return
+        if self._ai_config is None:
+            self.status_label.setText("AI Search: configure an endpoint first.")
+            return
+        try:
+            self._ai_config.validate()
+        except AIAnalystError as error:
+            self.status_label.setText(f"AI Search: {error}")
+            return
+
+        from .main import AISearchTask
+
+        self.ai_search_btn.setEnabled(False)
+        self.ai_search_clear_btn.setEnabled(False)
+        self.status_label.setText("AI Search: preparing candidate context...")
+        task = AISearchTask(
+            query,
+            self.results,
+            self._ai_config,
+            lambda addresses, error, cancelled: self.on_ai_search_complete(
+                task, addresses, error, cancelled
+            ),
+        )
+        self._ai_search_task = task
+        task.start()
+
+    def on_ai_search_complete(self, task, addresses, error, cancelled):
+        execute_on_main_thread(
+            lambda: self._finish_ai_search(task, addresses, error, cancelled)
+        )
+
+    def _finish_ai_search(self, task, addresses, error, cancelled):
+        if task is not self._ai_search_task:
+            return
+        self._ai_search_task = None
+        self.ai_search_btn.setEnabled(True)
+        if cancelled:
+            self.status_label.setText("AI Search: cancelled.")
+            return
+        if error:
+            self.status_label.setText(f"AI Search: {error}")
+            return
+
+        self._ai_search_addresses = set(addresses)
+        self.ai_search_clear_btn.setEnabled(True)
+        self.refresh_table()
+        self.status_label.setText(
+            f"AI Search: {len(addresses):,} matching function(s) found."
+        )
+
+    def clear_ai_search(self):
+        self._ai_search_addresses = None
+        self.ai_search_clear_btn.setEnabled(False)
+        self.refresh_table()
+        self.status_label.setText("AI Search: filter cleared.")
+
     def _add_result_row(self, res, query):
+        if (
+            self._ai_search_addresses is not None
+            and res.func.start not in self._ai_search_addresses
+        ):
+            return
         category = getattr(res, "category", "Other")
         searchable_text = f"{res.func.name} {category}".lower()
         if query and query not in searchable_text:
