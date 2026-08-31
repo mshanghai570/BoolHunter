@@ -8,6 +8,7 @@ BoolHunter is a Binary Ninja plugin that identifies Boolean-returning functions 
 - **Objective-C Support**: Automatically identifies common Boolean selector patterns.
 - **Confidence Scoring**: Each function is assigned a 0-100% score with detailed evidence.
 - **Behavioral Categories**: Results are labeled using conservative function-name heuristics, including Purchases, Authentication & Security, Network & Communication, Files & Storage, UI & Interaction, Navigation & Location, Media, Validation & State, and Other.
+- **Click-to-Navigate**: Clicking any result cell navigates directly to that function in Binary Ninja.
 
 ## Installation
 1. Copy the `boolhunter` directory into your Binary Ninja `plugins` folder.

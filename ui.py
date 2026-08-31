@@ -246,6 +246,7 @@ class BoolHunterSidebarWidget(SidebarWidget):
         self.table.setTextElideMode(Qt.ElideNone)
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.itemSelectionChanged.connect(self.on_selection_changed)
+        self.table.itemClicked.connect(self.on_item_clicked)
         self.table.doubleClicked.connect(self.on_double_click)
         self.splitter.addWidget(self.table)
 
@@ -605,9 +606,18 @@ class BoolHunterSidebarWidget(SidebarWidget):
             text += "\nAI ANALYST: No interpretation requested for this result.\n"
         self.details.setText(text)
 
+    def _navigate_to_result(self, result):
+        if result is None or self.bv is None:
+            return
+        self.bv.navigate(self.bv.view, result.func.start)
+
+    def on_item_clicked(self, item):
+        """Navigate immediately when any cell in a result row is clicked."""
+        self._navigate_to_result(self._selected_result())
+
     def on_double_click(self, index):
-        res = self.table.item(index.row(), 0).data(Qt.UserRole)
-        self.bv.navigate(self.bv.view, res.func.start)
+        # Keep double-click navigation as a backward-compatible fallback.
+        self._navigate_to_result(self._selected_result())
 
 
 class BoolHunterSidebarWidgetType(SidebarWidgetType):
