@@ -1,8 +1,10 @@
 import re
 import time
+import hashlib
+from collections import OrderedDict
 from dataclasses import dataclass
 from itertools import islice
-from typing import List
+from typing import Callable, List, Optional, Sequence
 
 from binaryninja import BinaryView, BoolType, Function, HighLevelILOperation
 
@@ -23,6 +25,8 @@ class BoolResult:
         self.score = 0
         self.evidence_list: List[Evidence] = []
         self.category = "Other"
+        self.topic_evidence: List[str] = []
+        self.analysis_limited = False
 
     def add(self, score: int, message: str):
         self.score += score
@@ -31,6 +35,25 @@ class BoolResult:
     @property
     def final_score(self) -> int:
         return min(100, self.score)
+
+
+@dataclass
+class TargetedScanResult:
+    results: List[BoolResult]
+    functions_considered: int
+    functions_deeply_analyzed: int
+    functions_limited: int
+    cancelled: bool
+    string_index_limited: bool = False
+    elapsed_seconds: float = 0.0
+
+    @property
+    def complete(self) -> bool:
+        return (
+            not self.cancelled
+            and self.functions_limited == 0
+            and not self.string_index_limited
+        )
 
 
 class BoolHunterEngine:
@@ -45,14 +68,30 @@ class BoolHunterEngine:
     MAX_CALLER_HLIL_SECONDS = 0.25
     MAX_HLIL_PARENT_DEPTH = 128
     MAX_CONDITIONAL_USES = 8
+    # shortcut: 128 entries, tune after representative Binary Ninja measurements.
+    MAX_ANALYSIS_CACHE_ENTRIES = 128
+    ANALYSIS_VERSION = 1
+    MAX_TOPIC_SOURCES_PER_FUNCTION = 64
+    MAX_TOPIC_STRING_CHARS = 512
+    MAX_TOPIC_EVIDENCE_CHARS = 96
+    PURCHASE_TOPIC_TERMS = (
+        "purchase", "purchases", "buy", "checkout", "cart", "carts", "order", "orders",
+        "transaction", "transactions", "payment", "payments", "billing",
+        "subscription", "subscriptions", "receipt", "receipts", "entitlement",
+        "entitlements", "storekit", "store kit", "appstore", "app store",
+        "storefront", "skpayment", "skproduct", "product", "products", "product id",
+        "product ids", "productid", "productids", "product identifier",
+        "product identifiers", "iap", "in app", "inapp", "sku", "skus",
+    )
 
     # Categories are intentionally conservative and based on recognizable
     # function-name vocabulary. The Boolean confidence score remains separate
     # from categorization so labels never affect candidate ranking.
     CATEGORY_PATTERNS = (
         ("Purchases", re.compile(
-            r"(?:purchase|buy|checkout|cart|order|transaction|payment|pay|"
-            r"billing|subscribe|subscription|receipt|in[_-]?app|store)", re.IGNORECASE
+            r"(?:purchases?|buy|checkout|carts?|orders?|transactions?|payments?|pay|"
+            r"billing|subscriptions?|receipts?|entitlements?|in[_-]?app|store)",
+            re.IGNORECASE,
         )),
         ("Authentication & Security", re.compile(
             r"(?:login|log[_-]?in|logout|log[_-]?out|auth|password|credential|"
@@ -102,6 +141,7 @@ class BoolHunterEngine:
 
     def __init__(self, bv: BinaryView):
         self.bv = bv
+        self._analysis_cache = OrderedDict()
         # Regex for common Boolean naming patterns (includes Obj-C)
         self.bool_patterns = re.compile(
             r'^(is|has|can|should|valid|enabled|active|exists|supports|contains|allows)',
@@ -155,7 +195,52 @@ class BoolHunterEngine:
         """Whether the cheap existing heuristics identify a priority candidate."""
         return self.fast_candidate_score(func) > 0
 
-    def analyze_function(self, func: Function) -> BoolResult:
+    def _cache_key(self, func: Function, deep: bool):
+        try:
+            size = max(0, int(func.total_bytes))
+            if not size or size > self.MAX_FUNCTION_BYTES:
+                return None
+            raw = self.bv.read(func.start, size)
+            if not raw:
+                return None
+            digest = hashlib.sha256(raw).digest()
+            return (
+                func.start,
+                digest,
+                str(func.return_type),
+                str(func.name),
+                self.ANALYSIS_VERSION,
+                bool(deep),
+            )
+        except Exception:
+            return None
+
+    @staticmethod
+    def _copy_result(source: BoolResult, func: Function) -> BoolResult:
+        result = BoolResult(func)
+        result.score = source.score
+        result.evidence_list = list(source.evidence_list)
+        result.category = source.category
+        result.analysis_limited = source.analysis_limited
+        return result
+
+    def _remember_result(self, key, result: BoolResult):
+        if key is None:
+            return
+        self._analysis_cache[key] = self._copy_result(result, result.func)
+        self._analysis_cache.move_to_end(key)
+        while len(self._analysis_cache) > self.MAX_ANALYSIS_CACHE_ENTRIES:
+            self._analysis_cache.popitem(last=False)
+
+    def analyze_function(self, func: Function, *, deep: bool = False) -> BoolResult:
+        # Ordinary HUNT stays off the hash/cache path; targeted deep scans are opt-in.
+        cache_key = self._cache_key(func, deep) if deep else None
+        if cache_key in self._analysis_cache:
+            self._analysis_cache.move_to_end(cache_key)
+            result = self._copy_result(self._analysis_cache[cache_key], func)
+            self._analyze_callers(func, result)
+            return result
+
         res = BoolResult(func)
         self._add_fast_evidence(func, res)
 
@@ -168,11 +253,19 @@ class BoolHunterEngine:
             except Exception:
                 hlil = None
             if hlil:
-                self._analyze_hlil(func, hlil, res)
+                try:
+                    res.analysis_limited = not self._analyze_hlil(func, hlil, res, deep=deep)
+                except Exception:
+                    res.analysis_limited = True
+            else:
+                res.analysis_limited = True
+        else:
+            res.analysis_limited = True
 
-        # Signal 4: Caller Analysis (+20)
+        # Cache local signals only; caller evidence depends on changing references.
+        if not res.analysis_limited:
+            self._remember_result(cache_key, res)
         self._analyze_callers(func, res)
-
         return res
 
     @staticmethod
@@ -181,7 +274,7 @@ class BoolHunterEngine:
         src = ret.src
         return src if isinstance(src, (list, tuple)) else [src]
 
-    def _analyze_hlil(self, func: Function, hlil, res: BoolResult):
+    def _analyze_hlil(self, func: Function, hlil, res: BoolResult, *, deep=False):
         returns = []
         instruction_count = 0
         deadline = time.monotonic() + self.MAX_HLIL_ANALYSIS_SECONDS
@@ -194,12 +287,12 @@ class BoolHunterEngine:
                 ):
                     # Do not award partial all-return-path evidence when all
                     # returns were not inspected.
-                    return
+                    return False
                 if instr.operation == HighLevelILOperation.HLIL_RET:
                     returns.append(instr)
 
         if not returns:
-            return
+            return True
 
         # Current HLIL represents HighLevelILRet.src as a list. Accept a scalar as
         # well to remain compatible with earlier API releases.
@@ -207,7 +300,7 @@ class BoolHunterEngine:
             expr for ret in returns for expr in self._return_expressions(ret)
         ]
         if not return_expressions:
-            return
+            return True
 
         # Signal 2: Constant Returns 0/1 (+35)
         is_all_bool_const = True
@@ -249,6 +342,162 @@ class BoolHunterEngine:
             if expr.operation in normalization_ops:
                 res.add(30, "Return value is logically normalized (Boolean normalization)")
                 break
+
+        if deep and all(
+            expr.operation == getattr(HighLevelILOperation, "HLIL_AND", None)
+            and self._has_single_bit_constant(expr)
+            for expr in return_expressions
+        ):
+            res.add(20, "All return paths use a single-bit mask")
+        return True
+
+    @staticmethod
+    def _has_single_bit_constant(expr) -> bool:
+        for operand in (getattr(expr, "left", None), getattr(expr, "right", None)):
+            if getattr(operand, "operation", None) == HighLevelILOperation.HLIL_CONST:
+                value = getattr(operand, "constant", 0)
+                if isinstance(value, int) and value > 0 and value & (value - 1) == 0:
+                    return True
+        return False
+
+    @staticmethod
+    def _normalize_topic_text(text: str) -> str:
+        text = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", text)
+        return re.sub(r"[^a-zA-Z0-9]+", " ", text).casefold().strip()
+
+    @classmethod
+    def _topic_terms(cls, terms: Sequence[str]) -> List[str]:
+        normalized = [cls._normalize_topic_text(term) for term in terms if isinstance(term, str)]
+        normalized = [term for term in normalized if term]
+        purchase_terms = set(cls.PURCHASE_TOPIC_TERMS)
+        if any(purchase_terms.intersection(term.split()) for term in normalized):
+            normalized.extend(cls.PURCHASE_TOPIC_TERMS)
+        return list(dict.fromkeys(normalized))
+
+    @classmethod
+    def _match_topic(cls, text: str, terms: Sequence[str]) -> Optional[str]:
+        normalized_text = " " + cls._normalize_topic_text(text) + " "
+        for term in terms:
+            if " " + term + " " in normalized_text:
+                return term
+        return None
+
+    def _referenced_strings(self, terms: Sequence[str], is_cancelled: Callable[[], bool]):
+        by_function = {}
+        index_limited = False
+        try:
+            strings = self.bv.get_strings()
+        except Exception:
+            return by_function, False, True
+
+        try:
+            for string in strings:
+                if is_cancelled():
+                    return by_function, True, index_limited
+                try:
+                    value = string.value
+                    if isinstance(value, bytes):
+                        value = value[:self.MAX_TOPIC_STRING_CHARS * 4].decode(
+                            "utf-8", errors="replace"
+                        )
+                    text = str(value).split("\x00", 1)[0][:self.MAX_TOPIC_STRING_CHARS]
+                    if not self._match_topic(text, terms):
+                        continue
+                    refs = self._get_bounded_code_refs(string.start)
+                except Exception:
+                    index_limited = True
+                    continue
+
+                for ref in refs:
+                    if is_cancelled():
+                        return by_function, True, index_limited
+                    try:
+                        function = getattr(ref, "function", None)
+                        if function is None or not text:
+                            continue
+                        sources = by_function.setdefault(function.start, [])
+                        if len(sources) < self.MAX_TOPIC_SOURCES_PER_FUNCTION - 1:
+                            sources.append(text)
+                    except Exception:
+                        index_limited = True
+        except Exception:
+            index_limited = True
+        return by_function, False, index_limited
+
+    def _topic_evidence(self, func: Function, terms: Sequence[str], referenced_strings) -> List[str]:
+        sources = [("function name", getattr(func, "name", ""))]
+        for value in referenced_strings.get(func.start, ())[:self.MAX_TOPIC_SOURCES_PER_FUNCTION - 1]:
+            sources.append(("referenced string", value))
+        for attribute, source in (("callees", "callee/API name"), ("callers", "caller name")):
+            remaining_sources = self.MAX_TOPIC_SOURCES_PER_FUNCTION - len(sources)
+            if remaining_sources <= 0:
+                break
+            try:
+                functions = getattr(func, attribute)
+            except Exception:
+                functions = ()
+            for related_function in islice(functions or (), remaining_sources):
+                sources.append((source, getattr(related_function, "name", "")))
+
+        evidence = []
+        for source, text in sources[:self.MAX_TOPIC_SOURCES_PER_FUNCTION]:
+            matched_term = self._match_topic(str(text), terms)
+            if matched_term:
+                excerpt = str(text).replace("\n", " ")[:self.MAX_TOPIC_EVIDENCE_CHARS]
+                evidence.append(f"{source} matched '{matched_term}': {excerpt}")
+        return list(dict.fromkeys(evidence))
+
+    def analyze_targeted(
+        self,
+        topic_terms: Sequence[str],
+        is_cancelled: Callable[[], bool],
+        on_progress: Optional[Callable[[int, int, int], None]] = None,
+    ) -> TargetedScanResult:
+        """Triage every function, then deeply analyze topic-relevant candidates."""
+        started = time.monotonic()
+        functions = list(self.bv.functions)
+        total = len(functions)
+        terms = self._topic_terms(topic_terms)
+        referenced_strings, cancelled, string_index_limited = self._referenced_strings(
+            terms, is_cancelled
+        )
+        results = []
+        considered = 0
+        deeply_analyzed = 0
+        limited = 0
+
+        if cancelled:
+            return TargetedScanResult(
+                results, 0, 0, 0, True, string_index_limited,
+                time.monotonic() - started,
+            )
+
+        for func in functions:
+            if is_cancelled():
+                cancelled = True
+                break
+            considered += 1
+            topic_evidence = self._topic_evidence(func, terms, referenced_strings)
+            if topic_evidence:
+                deeply_analyzed += 1
+                result = self.analyze_function(func, deep=True)
+                result.topic_evidence = topic_evidence
+                if result.analysis_limited:
+                    limited += 1
+                if result.final_score > 15:
+                    results.append(result)
+            if on_progress is not None:
+                on_progress(considered, total, deeply_analyzed)
+
+        return TargetedScanResult(
+            results,
+            considered,
+            deeply_analyzed,
+            limited,
+            cancelled,
+            string_index_limited,
+            time.monotonic() - started,
+        )
 
     def _is_conditionally_used(self, c_hlil, address: int) -> bool:
         """Return whether the current HLIL AST places an instruction at address in a branch."""

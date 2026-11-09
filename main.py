@@ -1,5 +1,6 @@
 import time
-from typing import Callable, List
+from dataclasses import dataclass
+from typing import Callable, List, Optional, Sequence
 
 from binaryninja import BackgroundTaskThread, BinaryView, PluginCommand
 from binaryninjaui import Sidebar
@@ -7,13 +8,13 @@ from binaryninjaui import Sidebar
 from .ai import (
     AIAnalystError,
     AIProviderConfig,
+    IntentPlan,
     OpenAICompatibleClient,
     build_analysis_messages,
-    build_search_messages,
-    category_search_addresses,
-    parse_search_addresses,
+    build_intent_messages,
+    parse_intent_plan,
 )
-from .engine import BoolHunterEngine, BoolResult
+from .engine import BoolHunterEngine, BoolResult, TargetedScanResult
 from .ui import BoolHunterSidebarWidget, BoolHunterSidebarWidgetType
 
 
@@ -29,13 +30,14 @@ class HunterTask(BackgroundTaskThread):
         on_progress: Callable,
         on_results: Callable,
         on_complete: Callable,
+        engine: Optional[BoolHunterEngine] = None,
     ):
         super().__init__("Running BoolHunter...", True)
         self.bv = bv
         self.on_progress = on_progress
         self.on_results = on_results
         self.on_complete = on_complete
-        self.engine = BoolHunterEngine(bv)
+        self.engine = engine or BoolHunterEngine(bv)
 
     def _publish_progress(
         self,
@@ -176,6 +178,84 @@ class HunterTask(BackgroundTaskThread):
         self.on_complete(results, self.cancelled)
 
 
+@dataclass
+class AIChatResult:
+    plan: IntentPlan
+    scan: Optional[TargetedScanResult]
+
+
+class AIChatTask(BackgroundTaskThread):
+    """Interpret one user turn and run its validated targeted scan, if needed."""
+
+    def __init__(
+        self,
+        engine: BoolHunterEngine,
+        query: str,
+        history: Sequence[dict],
+        config: AIProviderConfig,
+        on_progress: Callable[[str, int, int, int], None],
+        on_complete: Callable[[Optional[AIChatResult], Optional[str], bool], None],
+        client_factory: Callable = OpenAICompatibleClient,
+    ):
+        super().__init__("BoolHunter AI chat...", True)
+        self.engine = engine
+        self.query = query
+        self.history = list(history)
+        self.config = config
+        self.on_progress = on_progress
+        self.on_complete = on_complete
+        self.client_factory = client_factory
+        self._last_progress_time = 0.0
+
+    def _progress(self, phase: str, considered=0, total=0, deeply_analyzed=0):
+        self.progress = phase
+        now = time.monotonic()
+        if (
+            not considered
+            or considered == total
+            or now - self._last_progress_time >= 0.20
+        ):
+            self.on_progress(phase, considered, total, deeply_analyzed)
+            self._last_progress_time = now
+
+    def run(self):
+        result = None
+        error = None
+        cancelled = bool(self.cancelled)
+        try:
+            if not cancelled:
+                self._progress("Interpreting request")
+                messages = build_intent_messages(self.query, self.history)
+                response = self.client_factory(self.config).analyze(messages)
+                cancelled = bool(self.cancelled)
+                if not cancelled:
+                    plan = parse_intent_plan(response)
+                    if plan.action == "clarify":
+                        result = AIChatResult(plan, None)
+                    else:
+                        scan = self.engine.analyze_targeted(
+                            plan.terms,
+                            lambda: bool(self.cancelled),
+                            lambda considered, total, deep: self._progress(
+                                "Scanning whole binary", considered, total, deep
+                            ),
+                        )
+                        result = AIChatResult(plan, scan)
+                        cancelled = bool(self.cancelled) or scan.cancelled
+        except AIAnalystError as failure:
+            error = str(failure)
+        except Exception as failure:
+            error = f"Unexpected AI chat error: {failure}"
+        finally:
+            if self.cancelled:
+                cancelled = True
+                error = None
+            try:
+                self.on_complete(result, error, cancelled)
+            finally:
+                self.finish()
+
+
 class AIAnalysisTask(BackgroundTaskThread):
     """Run one optional AI interpretation without altering deterministic results."""
 
@@ -211,53 +291,6 @@ class AIAnalysisTask(BackgroundTaskThread):
             self.on_complete(None, str(error), False)
         except Exception as error:
             self.on_complete(None, f"Unexpected AI Analyst error: {error}", False)
-
-
-class AISearchTask(BackgroundTaskThread):
-    """Run an optional natural-language search without changing result scores."""
-
-    def __init__(
-        self,
-        query: str,
-        results: List[BoolResult],
-        config: AIProviderConfig,
-        on_complete: Callable,
-        client_factory: Callable = OpenAICompatibleClient,
-    ):
-        super().__init__("BoolHunter AI search...", True)
-        self.query = query
-        self.results = list(results)
-        self.config = config
-        self.on_complete = on_complete
-        self.client_factory = client_factory
-
-    def run(self):
-        if self.cancelled:
-            self.on_complete([], None, True)
-            return
-
-        try:
-            self.progress = "Preparing AI search context..."
-            messages = build_search_messages(self.query, self.results)
-            allowed_addresses = [result.func.start for result in self.results]
-            if self.cancelled:
-                self.on_complete([], None, True)
-                return
-
-            self.progress = "Searching with configured AI provider..."
-            response = self.client_factory(self.config).analyze(messages)
-            matches = parse_search_addresses(response, allowed_addresses)
-
-            # Category requests have a deterministic answer from BoolHunter's
-            # own labels. Use it when a provider returns no usable addresses so
-            # a category search remains reliable across provider response styles.
-            if not matches:
-                matches = category_search_addresses(self.query, self.results)
-            self.on_complete(matches, None, self.cancelled)
-        except AIAnalystError as error:
-            self.on_complete([], str(error), False)
-        except Exception as error:
-            self.on_complete([], f"Unexpected AI Search error: {error}", False)
 
 
 def launch_plugin(bv: BinaryView):

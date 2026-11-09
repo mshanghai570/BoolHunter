@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (
 )
 
 from .ai import AIAnalystError, AIProviderConfig
+from .engine import BoolHunterEngine
 
 
 class AIConfigDialog(QDialog):
@@ -92,40 +93,57 @@ class BoolHunterSidebarWidget(SidebarWidget):
         super().__init__(name)
         self.frame = frame
         self.bv = data
+        self._engine = BoolHunterEngine(data) if data is not None else None
         self.results = []
+        self._hunt_results = []
+        self._topic_results = []
         self._hunt_task = None
         self._ai_task = None
-        self._ai_search_task = None
+        self._chat_task = None
         self._ai_config = None
         self._ai_interpretations = {}
-        self._ai_search_addresses = None
-        self._ai_search_query = ""
+        self._ai_history = []
+        self._chat_lines = []
         self.setup_ui()
         self.bind_to_active_view()
 
     def _set_binary_view(self, bv):
         """Update the analysis target and discard results from a different view."""
-        if bv is None or bv is self.bv:
+        if bv is self.bv:
             return
         try:
-            if bv == self.bv:
-                return
-            # Binary Ninja may expose a fresh Python wrapper for the same open
-            # file after navigation. Do not discard results in that case.
-            new_file = getattr(bv, "file", None)
-            current_file = getattr(self.bv, "file", None)
-            if new_file is not None and new_file is current_file:
-                self.bv = bv
+            if bv is not None and bv == self.bv:
                 return
         except Exception:
             pass
 
         self.bv = bv
+        if self._hunt_task is not None:
+            self._hunt_task.cancel()
+            self._hunt_task = None
+            self.hunt_btn.setEnabled(True)
+            self.hunt_btn.setText("🎯 HUNT")
+        if self._ai_task is not None:
+            self._ai_task.cancel()
+            self._ai_task = None
+            self.ai_analyze_btn.setEnabled(False)
+        if self._chat_task is not None:
+            self._chat_task.cancel()
+            self._chat_task = None
+        self._engine = BoolHunterEngine(bv) if bv is not None else None
         self.results = []
+        self._hunt_results = []
+        self._topic_results = []
         self._ai_interpretations = {}
-        self._ai_search_addresses = None
-        self._ai_search_query = ""
-        self.ai_search_clear_btn.setEnabled(False)
+        self._ai_history = []
+        self._chat_lines = []
+        self.chat_transcript.clear()
+        self.chat_send_btn.setEnabled(True)
+        self.chat_clear_btn.setEnabled(True)
+        self.chat_cancel_btn.setEnabled(False)
+        self.chat_input.setEnabled(bv is not None)
+        self.chat_send_btn.setEnabled(bv is not None)
+        self.hunt_btn.setEnabled(bv is not None)
         self.table.setRowCount(0)
         self.details.clear()
         self.ai_analyze_btn.setEnabled(False)
@@ -179,6 +197,7 @@ class BoolHunterSidebarWidget(SidebarWidget):
         self.layout.addLayout(top_row)
 
         self.status_label = QLabel("Ready")
+        self.status_label.setAccessibleName("BoolHunter status")
         self.status_label.setStyleSheet("color: #a0a0a0; padding: 2px 0;")
         self.layout.addWidget(self.status_label)
 
@@ -193,40 +212,45 @@ class BoolHunterSidebarWidget(SidebarWidget):
         ai_row.addWidget(self.ai_analyze_btn)
         self.layout.addLayout(ai_row)
 
-        ai_search_row = QHBoxLayout()
-        self.ai_search_edit = QLineEdit()
-        self.ai_search_edit.setPlaceholderText(
-            "Ask AI: find purchase related functions..."
+        self.chat_transcript = QTextEdit()
+        self.chat_transcript.setReadOnly(True)
+        self.chat_transcript.setMaximumHeight(180)
+        self.chat_transcript.setAccessibleName("Chat conversation")
+        self.chat_transcript.setPlaceholderText(
+            "Ask BoolHunter to investigate a topic across the whole binary."
         )
-        self.ai_search_edit.setToolTip(
-            "Type a request such as 'find purchase related functions' and press Enter."
-        )
-        self.ai_search_edit.returnPressed.connect(self.on_ai_search_clicked)
-        self.ai_search_btn = QPushButton("Ask AI")
-        self.ai_search_btn.setToolTip(
-            "Search the current Hunt results using your natural-language request."
-        )
-        self.ai_search_btn.clicked.connect(self.on_ai_search_clicked)
-        self.ai_search_clear_btn = QPushButton("Clear AI Search")
-        self.ai_search_clear_btn.setEnabled(False)
-        self.ai_search_clear_btn.clicked.connect(self.clear_ai_search)
-        ai_search_row.addWidget(self.ai_search_edit)
-        ai_search_row.addWidget(self.ai_search_btn)
-        ai_search_row.addWidget(self.ai_search_clear_btn)
-        self.layout.addLayout(ai_search_row)
+        conversation_label = QLabel("Conversation:")
+        conversation_label.setBuddy(self.chat_transcript)
+        self.layout.addWidget(conversation_label)
+        self.layout.addWidget(self.chat_transcript)
 
-        self.ai_results_panel = QTextEdit()
-        self.ai_results_panel.setReadOnly(True)
-        self.ai_results_panel.setMaximumHeight(150)
-        self.ai_results_panel.setStyleSheet(
-            "background-color: #202b36; color: #d9edf7; "
-            "font-family: monospace; padding: 4px;"
+        chat_row = QHBoxLayout()
+        message_label = QLabel("Message:")
+        self.chat_input = QLineEdit()
+        self.chat_input.setAccessibleName("Chat message")
+        self.chat_input.setPlaceholderText(
+            "Double down on purchase-related booleans..."
         )
-        self.ai_results_panel.setPlainText(
-            "AI SEARCH RESULTS\n"
-            "Run Ask AI to find related functions in the current Hunt results."
+        self.chat_input.setEnabled(self.bv is not None)
+        message_label.setBuddy(self.chat_input)
+        self.chat_input.returnPressed.connect(self.on_chat_send)
+        self.chat_send_btn = QPushButton("Send")
+        self.chat_send_btn.setEnabled(self.bv is not None)
+        self.chat_send_btn.clicked.connect(self.on_chat_send)
+        self.chat_cancel_btn = QPushButton("Cancel")
+        self.chat_cancel_btn.setEnabled(False)
+        self.chat_cancel_btn.setToolTip(
+            "Stops scans immediately. An in-flight provider request finishes or times out first."
         )
-        self.layout.addWidget(self.ai_results_panel)
+        self.chat_cancel_btn.clicked.connect(self.on_chat_cancel)
+        self.chat_clear_btn = QPushButton("Clear chat")
+        self.chat_clear_btn.clicked.connect(self.clear_chat)
+        chat_row.addWidget(message_label)
+        chat_row.addWidget(self.chat_input)
+        chat_row.addWidget(self.chat_send_btn)
+        chat_row.addWidget(self.chat_cancel_btn)
+        chat_row.addWidget(self.chat_clear_btn)
+        self.layout.addLayout(chat_row)
 
         # Main Content
         self.splitter = QSplitter(Qt.Vertical)
@@ -270,18 +294,22 @@ class BoolHunterSidebarWidget(SidebarWidget):
         self.bind_to_active_view()
         if self.bv is None:
             return
+        if self._chat_task is not None:
+            self.status_label.setText("AI chat is active; wait for it to finish before HUNT.")
+            return
 
         from .main import HunterTask
 
         self.results = []
+        self._hunt_results = []
+        self._topic_results = []
         self._ai_interpretations = {}
-        self._ai_search_addresses = None
-        self._ai_search_query = ""
-        self.ai_search_clear_btn.setEnabled(False)
         self.table.setRowCount(0)
         self.details.clear()
         self.ai_analyze_btn.setEnabled(False)
         self.hunt_btn.setEnabled(False)
+        self.chat_input.setEnabled(False)
+        self.chat_send_btn.setEnabled(False)
         self.hunt_btn.setText("Hunting...")
         self.status_label.setText("Starting Boolean heuristic screening...")
 
@@ -290,6 +318,7 @@ class BoolHunterSidebarWidget(SidebarWidget):
             lambda *args: self.on_hunt_progress(task, *args),
             lambda results: self.on_hunt_results(task, results),
             lambda results, cancelled: self.on_hunt_complete(task, results, cancelled),
+            self._engine,
         )
         self._hunt_task = task
         task.start()
@@ -340,6 +369,11 @@ class BoolHunterSidebarWidget(SidebarWidget):
     def _append_hunt_results(self, task, results):
         if task is not self._hunt_task:
             return
+        self._hunt_results.extend(results)
+        if self._topic_results:
+            self._merge_results()
+            self.refresh_table()
+            return
         self.results.extend(results)
         query = self.filter_edit.text().lower()
         for res in sorted(results, key=lambda x: x.final_score, reverse=True):
@@ -353,10 +387,13 @@ class BoolHunterSidebarWidget(SidebarWidget):
     def _finish_hunt(self, task, results, cancelled):
         if task is not self._hunt_task:
             return
-        self.results = results
+        self._hunt_results = list(results)
+        self._merge_results()
         self.refresh_table()
         self.hunt_btn.setEnabled(True)
         self.hunt_btn.setText("🎯 HUNT AGAIN")
+        self.chat_input.setEnabled(self.bv is not None)
+        self.chat_send_btn.setEnabled(self.bv is not None)
         state = "Cancelled" if cancelled else "Complete"
         self.status_label.setText(f"{state}: {len(results):,} Boolean candidates found")
         self._hunt_task = None
@@ -437,119 +474,160 @@ class BoolHunterSidebarWidget(SidebarWidget):
         if selected is result:
             self._show_selected_analysis(result)
 
-    def on_ai_search_clicked(self):
-        query = self.ai_search_edit.text().strip()
+    def _append_chat_line(self, speaker, text):
+        self._chat_lines.append(f"{speaker}: {text}")
+        self._chat_lines = self._chat_lines[-80:]
+        self.chat_transcript.setPlainText("\n\n".join(self._chat_lines))
+        scrollbar = self.chat_transcript.verticalScrollBar()
+        scrollbar.setValue(scrollbar.maximum())
+
+    def _merge_results(self):
+        merged = {item.func.start: item for item in self._hunt_results}
+        merged.update({item.func.start: item for item in self._topic_results})
+        self.results = list(merged.values())
+
+    def on_chat_send(self):
+        self.bind_to_active_view()
+        query = self.chat_input.text().strip()
         if not query:
-            self.status_label.setText("AI Search: enter a natural-language query first.")
+            self.status_label.setText("AI chat: enter a request first.")
             return
-        if not self.results:
-            self.status_label.setText("AI Search: run Hunt before searching its results.")
+        if self.bv is None or self._engine is None:
+            self.status_label.setText("AI chat: no active BinaryView.")
+            return
+        if self._chat_task is not None:
+            return
+        if self._hunt_task is not None:
+            self.status_label.setText("HUNT is active; wait for it to finish before AI chat.")
             return
         if self._ai_config is None:
-            self.status_label.setText("AI Search: configure an endpoint first.")
+            self.status_label.setText("AI chat: configure an endpoint first.")
             return
         try:
             self._ai_config.validate()
         except AIAnalystError as error:
-            self.status_label.setText(f"AI Search: {error}")
+            self.status_label.setText(f"AI chat: {error}")
             return
 
-        from .main import AISearchTask
+        from .main import AIChatTask
 
-        self.ai_search_btn.setEnabled(False)
-        self.ai_search_clear_btn.setEnabled(False)
-        self.status_label.setText("AI Search: preparing candidate context...")
-        task = AISearchTask(
+        self._topic_results = []
+        self._merge_results()
+        self.refresh_table()
+        self.chat_input.clear()
+        self._append_chat_line("You", query)
+        self.hunt_btn.setEnabled(False)
+        self.chat_send_btn.setEnabled(False)
+        self.chat_clear_btn.setEnabled(False)
+        self.chat_cancel_btn.setEnabled(True)
+        self.status_label.setText("AI chat: interpreting request...")
+        history = list(self._ai_history)
+        task = AIChatTask(
+            self._engine,
             query,
-            self.results,
+            history,
             self._ai_config,
-            lambda addresses, error, cancelled: self.on_ai_search_complete(
-                task, addresses, error, cancelled
+            lambda *args: self.on_chat_progress(task, *args),
+            lambda result, error, cancelled: self.on_chat_complete(
+                task, query, result, error, cancelled
             ),
         )
-        self._ai_search_task = task
+        self._chat_task = task
         task.start()
 
-    def on_ai_search_complete(self, task, addresses, error, cancelled):
-        execute_on_main_thread(
-            lambda: self._finish_ai_search(task, addresses, error, cancelled)
-        )
+    def on_chat_progress(self, task, phase, considered, total, deeply_analyzed):
+        execute_on_main_thread(lambda: self._update_chat_progress(
+            task, phase, considered, total, deeply_analyzed
+        ))
 
-    def _finish_ai_search(self, task, addresses, error, cancelled):
-        if task is not self._ai_search_task:
+    def _update_chat_progress(self, task, phase, considered, total, deeply_analyzed):
+        if task is not self._chat_task:
             return
-        self._ai_search_task = None
-        self.ai_search_btn.setEnabled(True)
-        if cancelled:
-            self.status_label.setText("AI Search: cancelled.")
+        if total:
+            self.status_label.setText(
+                f"AI chat: {phase} {considered:,}/{total:,}; "
+                f"{deeply_analyzed:,} deeply analyzed."
+            )
+        else:
+            self.status_label.setText(f"AI chat: {phase.lower()}...")
+
+    def on_chat_cancel(self):
+        if self._chat_task is not None:
+            self._chat_task.cancel()
+            self.chat_cancel_btn.setEnabled(False)
+            self.status_label.setText(
+                "AI chat: cancellation requested; waiting for the provider request or scan to stop."
+            )
+
+    def on_chat_complete(self, task, query, result, error, cancelled):
+        execute_on_main_thread(lambda: self._finish_chat(
+            task, query, result, error, cancelled
+        ))
+
+    def _finish_chat(self, task, query, result, error, cancelled):
+        if task is not self._chat_task:
             return
+        self._chat_task = None
+        self.chat_send_btn.setEnabled(True)
+        self.chat_clear_btn.setEnabled(True)
+        self.chat_cancel_btn.setEnabled(False)
+        self.hunt_btn.setEnabled(self.bv is not None)
         if error:
-            self.status_label.setText(f"AI Search: {error}")
+            self._append_chat_line("BoolHunter", f"Request failed: {error}")
+            self.status_label.setText(f"AI chat: {error}")
+            return
+        if result is None:
+            self.status_label.setText("AI chat: cancelled before analysis completed.")
             return
 
-        self._ai_search_addresses = set(addresses)
-        self._ai_search_query = task.query
-        self.ai_search_clear_btn.setEnabled(True)
-        self.refresh_table()
-        self._update_ai_results_panel()
+        self._append_chat_line("BoolHunter", result.plan.reply)
+        self._ai_history.extend([
+            {"role": "user", "content": query},
+            {"role": "assistant", "content": result.plan.reply},
+        ])
+        self._ai_history = self._ai_history[-12:]
+        if result.scan is None:
+            self.status_label.setText("AI chat: clarification requested.")
+            return
 
-        # Make the AI output immediately visible: select and center the first
-        # matching row so its full deterministic analysis appears below.
-        if addresses:
+        scan = result.scan
+        self._topic_results = list(scan.results)
+        self._merge_results()
+        self.refresh_table()
+        state = "cancelled" if cancelled or scan.cancelled else (
+            "complete" if scan.complete else "partial"
+        )
+        summary = (
+            f"Targeted scan {state}: considered {scan.functions_considered:,}; "
+            f"deeply analyzed {scan.functions_deeply_analyzed:,}; "
+            f"returned {len(scan.results):,} candidate(s); "
+            f"limited {scan.functions_limited:,}; "
+            f"string-reference index limited: {scan.string_index_limited}; "
+            f"elapsed {scan.elapsed_seconds:.1f}s."
+        )
+        self._append_chat_line("BoolHunter", summary)
+        self.status_label.setText(summary)
+
+        if scan.results:
+            target = scan.results[0].func.start
             for row in range(self.table.rowCount()):
-                item = self.table.item(row, 3)
-                if item is not None and item.text().lower() == hex(addresses[0]).lower():
+                address_item = self.table.item(row, 3)
+                if address_item is not None and address_item.text().lower() == hex(target).lower():
                     self.table.selectRow(row)
                     self.table.scrollToItem(
                         self.table.item(row, 0), QAbstractItemView.PositionAtCenter
                     )
                     break
-        self.status_label.setText(
-            f"AI Search: {len(addresses):,} matching function(s) found. "
-            "Matches are highlighted below."
-        )
 
-    def _update_ai_results_panel(self):
-        if self._ai_search_addresses is None:
-            self.ai_results_panel.setPlainText(
-                "AI SEARCH RESULTS\n"
-                "Run Ask AI to find related functions in the current Hunt results."
-            )
+    def clear_chat(self):
+        if self._chat_task is not None:
             return
-
-        matches = [
-            result for result in self.results
-            if result.func.start in self._ai_search_addresses
-        ]
-        lines = [
-            f"AI SEARCH RESULTS ({len(matches):,} MATCHES)",
-            f"Request: {self._ai_search_query}",
-        ]
-        if not matches:
-            lines.append("No matching functions were found in the current Hunt results.")
-        else:
-            lines.append("Matched functions (select a row for full analysis):")
-            for result in sorted(matches, key=lambda item: item.final_score, reverse=True):
-                lines.append(
-                    f"  {result.func.name} | {getattr(result, 'category', 'Other')} | "
-                    f"{result.final_score}% | {hex(result.func.start)}"
-                )
-        self.ai_results_panel.setPlainText("\n".join(lines))
-
-    def clear_ai_search(self):
-        self._ai_search_addresses = None
-        self._ai_search_query = ""
-        self.ai_search_clear_btn.setEnabled(False)
-        self.refresh_table()
-        self._update_ai_results_panel()
-        self.status_label.setText("AI Search: filter cleared.")
+        self._ai_history.clear()
+        self._chat_lines.clear()
+        self.chat_transcript.clear()
+        self.status_label.setText("AI chat cleared.")
 
     def _add_result_row(self, res, query):
-        if (
-            self._ai_search_addresses is not None
-            and res.func.start not in self._ai_search_addresses
-        ):
-            return
         category = getattr(res, "category", "Other")
         searchable_text = f"{res.func.name} {category}".lower()
         if query and query not in searchable_text:
@@ -574,10 +652,6 @@ class BoolHunterSidebarWidget(SidebarWidget):
         self.table.setItem(row, 2, score_item)
         self.table.setItem(row, 3, QTableWidgetItem(hex(res.func.start)))
 
-        if self._ai_search_addresses is not None:
-            for column in range(self.table.columnCount()):
-                self.table.item(row, column).setBackground(QColor("#3b2f12"))
-
     def refresh_table(self):
         query = self.filter_edit.text().lower()
         self.table.setRowCount(0)
@@ -586,7 +660,6 @@ class BoolHunterSidebarWidget(SidebarWidget):
         # search filtering or hunt completion. Live batches append efficiently.
         for res in sorted(self.results, key=lambda x: x.final_score, reverse=True):
             self._add_result_row(res, query)
-        self._update_ai_results_panel()
 
     def on_selection_changed(self):
         result = self._selected_result()
@@ -598,12 +671,17 @@ class BoolHunterSidebarWidget(SidebarWidget):
         text = "BOOLHUNTER DETERMINISTIC ANALYSIS\n"
         text += f"Function:  {res.func.name}\n"
         text += f"Address:   {hex(res.func.start)}\n"
-        text += f"Confidence: {res.final_score}%\n"
+        text += f"Score:      {res.final_score}%\n"
         text += f"Category:  {getattr(res, 'category', 'Other')}\n"
         text += f"Return:    {res.func.return_type}\n"
         text += "\nDETERMINISTIC EVIDENCE:\n"
         for ev in res.evidence_list:
             text += f" ✓ {ev.message} (+{ev.score})\n"
+
+        if res.topic_evidence:
+            text += "\nTARGETED TOPIC MATCHES (do not affect score):\n"
+            for evidence in res.topic_evidence:
+                text += f" • {evidence}\n"
 
         interpretation = self._ai_interpretations.get(res.func.start)
         if interpretation:
